@@ -1,0 +1,69 @@
+========================================
+📋 Task: gsm8k_test | Split: test
+🔑 Keys Mapped -> Q: 'instruction', A: 'output', GT: 'answer'
+========================================
+🧪 Ground Truth Type Analysis (from gt_key)
+========================================
+Type [FLOAT]: 1319 (100.00%)
+Type [ABC]: 0 (0.00%)
+Type [TEXT]: 0 (0.00%)
+========================================
+📊 Raw Text Length Analysis (chars)
+========================================
+Question (instruction):
+  Mean : 239.87
+  Std  : 97.57
+  Min  : 73
+  Max  : 848
+  Count: 1319
+
+Output (output):
+  Mean : 275.42
+  Std  : 89.27
+  Min  : 0
+  Max  : 736
+  Count: 1319
+
+========================================
+🔢 Tokenized Length Analysis (tokens)
+========================================
+Question Tokens:
+  Mean : 73.96
+  Std  : 22.22
+  Min  : 36
+  Max  : 201
+  Count: 1319
+
+Answer Tokens:
+  Mean : 100.40
+  Std  : 31.30
+  Min  : 1
+  Max  : 263
+  Count: 1319
+
+Total Tokens:
+  Mean : 174.36
+  Std  : 45.86
+  Min  : 84
+  Max  : 413
+  Count: 1319
+
+--------------------
+--- Question Tokens (instruction) ---
+<= 128: 1286 (97.50%)
+<= 256: 1319 (100.00%)
+<= 512: 1319 (100.00%)
+<= 1024: 1319 (100.00%)
+
+--- Answer Tokens (output) ---
+<= 128: 1100 (83.40%)
+<= 256: 1318 (99.92%)
+<= 512: 1319 (100.00%)
+<= 1024: 1319 (100.00%)
+
+--- Total Tokens ---
+<= 128: 184 (13.95%)
+<= 256: 1245 (94.39%)
+<= 512: 1319 (100.00%)
+<= 1024: 1319 (100.00%)
+========================================

@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 数据集（通过 README 说明下载方式）
+data/llm_adapt/
+
+# 训练产物
+ckpts/
+logs/
+wandb/
+
+# 评测结果
+eval/results/
+
+# 环境
+*.egg-info/
+dist/
+build/
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Antivirus baitfiles (created by endpoint security software, not project files)
+*antsec*
+AkC25A74Sq.*
+\!antsec-win-starpoint*

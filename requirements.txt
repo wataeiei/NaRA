@@ -1,0 +1,18 @@
+# Core
+torch>=2.0.0
+transformers==4.49.0
+accelerate==0.34.2
+peft==0.18.0
+omegaconf>=2.3.0
+
+# Evaluation
+lm_eval==0.4.8
+antlr4-python3-runtime==4.11
+math_verify
+sympy
+hf_xet
+
+# Training utilities
+datasets>=2.0.0
+wandb
+safetensors

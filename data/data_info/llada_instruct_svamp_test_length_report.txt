@@ -1,0 +1,69 @@
+========================================
+📋 Task: svamp | Split: test
+🔑 Keys Mapped -> Q: 'instruction', A: 'output', GT: 'answer'
+========================================
+🧪 Ground Truth Type Analysis (from gt_key)
+========================================
+Type [FLOAT]: 1000 (100.00%)
+Type [ABC]: 0 (0.00%)
+Type [TEXT]: 0 (0.00%)
+========================================
+📊 Raw Text Length Analysis (chars)
+========================================
+Question (instruction):
+  Mean : 162.85
+  Std  : 44.82
+  Min  : 68
+  Max  : 332
+  Count: 1000
+
+Output (output):
+  Mean : 187.91
+  Std  : 54.27
+  Min  : 72
+  Max  : 415
+  Count: 1000
+
+========================================
+🔢 Tokenized Length Analysis (tokens)
+========================================
+Question Tokens:
+  Mean : 54.20
+  Std  : 9.54
+  Min  : 34
+  Max  : 87
+  Count: 1000
+
+Answer Tokens:
+  Mean : 65.00
+  Std  : 17.83
+  Min  : 28
+  Max  : 140
+  Count: 1000
+
+Total Tokens:
+  Mean : 119.20
+  Std  : 23.78
+  Min  : 69
+  Max  : 227
+  Count: 1000
+
+--------------------
+--- Question Tokens (instruction) ---
+<= 128: 1000 (100.00%)
+<= 256: 1000 (100.00%)
+<= 512: 1000 (100.00%)
+<= 1024: 1000 (100.00%)
+
+--- Answer Tokens (output) ---
+<= 128: 999 (99.90%)
+<= 256: 1000 (100.00%)
+<= 512: 1000 (100.00%)
+<= 1024: 1000 (100.00%)
+
+--- Total Tokens ---
+<= 128: 684 (68.40%)
+<= 256: 1000 (100.00%)
+<= 512: 1000 (100.00%)
+<= 1024: 1000 (100.00%)
+========================================
