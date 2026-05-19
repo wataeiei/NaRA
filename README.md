@@ -1,6 +1,6 @@
 # NARA: Noise-Aware Rank Adaptation for Diffusion Language Models
 
-Official implementation of NARA, a parameter-efficient fine-tuning (PEFT) method for diffusion-based language models (dLLMs), as presented in our ICML 2026 submission.
+Official implementation of NARA, a parameter-efficient fine-tuning (PEFT) method for diffusion-based language models (dLLMs).
 
 Standard PEFT methods such as LoRA employ static weight updates that are agnostic to the noise level, making them suboptimal for dLLMs. In masked diffusion models (e.g., LLaDA), the denoising trajectory spans noise levels from fully masked ($\lambda=1$) to nearly clean ($\lambda \approx 0$), causing significant shifts in input distribution and reconstruction difficulty. A fixed adapter cannot optimally handle this entire range.
 
@@ -10,7 +10,7 @@ $$\mathbf{h} = \mathbf{W}_0 \mathbf{x} + \mathbf{B}\,\mathbf{C}(\lambda)\,\mathb
 
 $$\mathbf{C}(\lambda) = \mathbf{I}_r + \eta \cdot \mathcal{F}_\phi(\mathbf{e}_\lambda)$$
 
-Here $\mathbf{A}$ and $\mathbf{B}$ are static trainable matrices (as in standard LoRA), $\mathcal{F}_\phi$ is an MLP hypernetwork, and $\mathbf{e}_\lambda$ is a Gaussian Fourier embedding of $\lambda$. The hypernetwork is shared across all layers and modules, so $\mathbf{C}(\lambda)$ is computed once per denoising step and broadcast to all adapter layers, keeping parameter and latency overhead negligible. At initialization, the last layer of $\mathcal{F}_\phi$ is zeroed so that $\mathbf{C}(\lambda) = \mathbf{I}_r$ and NARA reduces to standard LoRA, ensuring training stability.
+Here $\mathbf{A}$ and $\mathbf{B}$ are static trainable matrices (as in standard LoRA), $\phi$ is an MLP hypernetwork, and $\mathbf{e}$ is a Gaussian Fourier embedding of $\lambda$. The hypernetwork is shared across all layers and modules, so $\mathbf{C}(\lambda)$ is computed once per denoising step and broadcast to all adapter layers, keeping parameter and latency overhead negligible. At initialization, the last layer of $\mathcal{F}_\phi$ is zeroed so that $\mathbf{C}(\lambda) = \mathbf{I}_r$ and NARA reduces to standard LoRA, ensuring training stability.
 
 <div align="center">
   <img src="assets/nara_framework.jpg" width="60%" alt="NARA Framework"/>
