@@ -86,7 +86,7 @@ NARA is built on [LLaDA-8B-Instruct](https://huggingface.co/GSAI-ML/LLaDA-8B-Ins
 ```bibtex
 @inproceedings{nara2026,
   title={Na{RA}: Noise-Aware Lo{RA} for Parameter-Efficient Fine-Tuning of Diffusion {LLM}s},
-  author={Shuaidi Wang and Zhan zhaung and Ruping Huang and Yu Zhang},
+  author={Shuaidi Wang and Zhan Zhuang and Ruping Huang and Yu Zhang},
   year={2026},
   booktitle={Forty-third International Conference on Machine Learning},
   year={2026},
