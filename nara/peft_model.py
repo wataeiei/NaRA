@@ -544,6 +544,11 @@ class PeftModelForSequenceClassification(PeftModel):
             prompts = self.get_prompt(batch_size=batch_size)
             prompts = prompts.to(inputs_embeds.dtype)
             inputs_embeds = torch.cat((prompts, inputs_embeds), dim=1)
+            print("========== PEFT ==========")
+            print(input_ids.dtype)
+            print(input_ids.device)
+            print(input_ids.shape)
+            
             return self.base_model(inputs_embeds=inputs_embeds, **kwargs)
 
     def _prefix_tuning_forward(

@@ -1,0 +1,62 @@
+paths:
+  experiment: /mnt/NaRA/experiments
+model: llada_instruct
+finetuning_method: nara
+task_name: math14k
+finetuning_parameters:
+  r_ab: 32
+  lora_dropout: 0.05
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - attn_out
+  fnn_hidden_size_1: 256
+  fnn_hidden_size_2: 512
+  init_c: zero_last
+  embedding_dim: 64
+  c_scale: 0.1
+  input_mode: nl
+  embedding_type: fourier
+data:
+  val_split_seed: 42
+  val_split_size: 128
+  batch_size: 1
+  max_length: 512
+train:
+  decoder_resume_path: null
+  head_resume_path: null
+  skipped_keys: null
+  global_step: null
+  global_epoch: null
+  global_sample_number: null
+  global_update_number: null
+  global_token_number: null
+  stage_1: 0
+  random_length: false
+  output_dir: ckpts
+  logging_dir: logs
+  mixed_precision: fp16
+  gradient_accumulation_steps: 32
+  report_to: wandb
+  epoch_num: 10
+  lr: 1e-4
+  warmup_ratio: 0.05
+  eval_every: 64
+  eval_from_start: true
+  save_every: 64
+  per_example_ratio: true
+  exp_name: ${model}_${finetuning_method}_${task_name}_r_${finetuning_parameters.r_ab}_lr_${train.lr}_epc_${train.epoch_num}_cscale_${finetuning_parameters.c_scale}_stage1_${train.stage_1}
+  wandb_proj: ${model}_${finetuning_method}_${task_name}
+  eval:
+    metric: loss
+    noise_levels: null
+    eval_epoches_num: 1
+    steps: 32
+    gen_length: 512
+    block_length: 16
+    temperature: 0.0
+    cfg_scale: 0.0
+    remasking: low_confidence
+    observe_steps: true
+max_steps: 80

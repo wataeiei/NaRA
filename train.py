@@ -1,3 +1,7 @@
+import os
+
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+os.environ["HUGGINGFACE_HUB_CACHE"] = "/root/hf_cache"
 from utils.util import flatten_dict
 from data.main_functions import get_dataloader
 from model.get_model import get_model_by_config
@@ -5,9 +9,8 @@ from utils.loss import compute_loss_by_config
 from eval.eval import evaluate_model
 from utils.util import get_accelerator
 import math
-from transformers import get_linear_schedule_with_warmup
 
-import os
+from transformers import get_linear_schedule_with_warmup
 import torch
 import argparse
 import torch.distributed as dist
@@ -22,6 +25,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # os.environ["WANDB_MODE"] = "offline"  # Removed: use online mode for LR ablation
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["WANDB_DISABLE_SYSTEM_METRICS"] = "true"
+
 
 def main(args):
     # Load + merge
@@ -757,7 +761,7 @@ def main(args):
                 torch.cuda.empty_cache()
                 accelerator.backward(loss_tgt)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_to_learn, 1.0)
+                    accelerator.clip_grad_norm_([p for group in params_to_learn for p in group['params']], 1.0)
                 optimizer.step()
                 scheduler.step()
                     

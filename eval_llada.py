@@ -1,11 +1,22 @@
 """
 This file is inspired by the code from https://github.com/ML-GSAI/SMDM
 """
+import os
+
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+os.environ["HUGGINGFACE_HUB_CACHE"] = "/root/hf_cache"
 
 import accelerate
 import torch
 import torch.nn.functional as F
 from datasets import Dataset
+
+
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
 from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM

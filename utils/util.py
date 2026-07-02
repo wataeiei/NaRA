@@ -182,7 +182,19 @@ def forward_with_noise_level(model, noisy_batch, noise_level, noise_density=None
     if randomize_noise and _random_noise_print_count < 3:
         print(f"[RandomNoise] Using randomized noise level: {effective_noise_level:.4f} (original: {noise_level})")
         _random_noise_print_count += 1
-    logits = model(noisy_batch).logits
+    
+    # 🌟 修改这里：确保 noisy_batch 在送入模型前一定是 Long 类型
+    if isinstance(noisy_batch, torch.Tensor):
+        noisy_batch = noisy_batch.long()
+    elif isinstance(noisy_batch, dict) and "input_ids" in noisy_batch:
+        # 如果 noisy_batch 是一个字典（HuggingFace 常见格式）
+        noisy_batch["input_ids"] = noisy_batch["input_ids"].long()
+        
+
+    with torch.cuda.amp.autocast(enabled=True, dtype=torch.float16, cache_enabled=True):
+        logits = model(noisy_batch).logits
+        
+    return logits
 
     # Reset context
     # if hasattr(real_model, "set_context_state"):
@@ -192,5 +204,5 @@ def forward_with_noise_level(model, noisy_batch, noise_level, noise_density=None
     # elif hasattr(real_model, "set_noise_level"):
     #     real_model.set_noise_level(noise_level=None)
 
-    return logits
+
 

@@ -410,8 +410,16 @@ def generate(
     clora_input_components = []
     clora_density_radius = None
 
+    # 🌟【新增安全获取逻辑】如果 config 里面没有定义这些模型，就返回 None 避免崩溃
+    TYPE_NORA  = getattr(FINETUNING_TYPE, "NORA", None)
+    TYPE_CLORA = getattr(FINETUNING_TYPE, "CLORA", None)
+    TYPE_NARA  = getattr(FINETUNING_TYPE, "NARA", None)
+    TYPE_TLORA = getattr(FINETUNING_TYPE, "TLORA", None)
+    TYPE_TNORA = getattr(FINETUNING_TYPE, "TNORA", None)
+    TYPE_DORA_V2 = getattr(FINETUNING_TYPE, "DORA_V2", None)
+
     # --- 1. NORA Configuration Setup (Original Logic) ---
-    if finetuning_type == FINETUNING_TYPE.NORA:
+    if TYPE_NORA is not None and finetuning_type == TYPE_NORA:
         real_model = model.module if hasattr(model, "module") else model
         peft_cfg = getattr(real_model, "peft_config", {}).get('default', None)
         
@@ -429,28 +437,26 @@ def generate(
             nora_density_radius = peft_cfg.density_radius
 
     # --- 2. CLoRA Configuration Setup (New Logic) ---
-    elif finetuning_type == FINETUNING_TYPE.CLORA:
+    elif TYPE_CLORA is not None and finetuning_type == TYPE_CLORA:
         real_model = model.module if hasattr(model, "module") else model
         peft_cfg = getattr(real_model, "peft_config", {}).get('default', None)
         
         if peft_cfg is not None:
-            # Retrieve CLoRA specific attributes
             clora_input_components = getattr(peft_cfg, "input_components", [])
             clora_density_radius = getattr(peft_cfg, "density_radius", None)
             
-            # Validation
             if "nd" in clora_input_components and clora_density_radius is None:
                 raise ValueError("CLORA config uses 'nd' (Noise Density) but 'density_radius' is missing/None.")
-    elif finetuning_type == FINETUNING_TYPE.NARA:
+
+    # --- 3. NARA Configuration Setup ---
+    elif TYPE_NARA is not None and finetuning_type == TYPE_NARA:
         real_model = model.module if hasattr(model, "module") else model
         peft_cfg = getattr(real_model, "peft_config", {}).get('default', None)
         
         if peft_cfg is not None:
-            # Retrieve CLoRA specific attributes
             nara_input_components = getattr(peft_cfg, "input_mode", None)
             nara_density_radius = getattr(peft_cfg, "density_radius", None)
             
-            # Validation
             if nara_input_components in ("nd","both") and nara_density_radius is None:
                 raise ValueError("NARA config uses 'nd' (Noise Density) but 'density_radius' is missing/None.")
     # ==========================================
@@ -474,7 +480,7 @@ def generate(
             mask_index = (x == mask_id)
 
             # --- BRANCH 1: NORA (Original Logic) ---
-            if finetuning_type == FINETUNING_TYPE.NORA:
+            if TYPE_NORA is not None and finetuning_type == TYPE_NORA:
                 
                 def get_nora_args(batch_mask_index, raw_noise_level):
                     """NORA-specific argument resolver based on input_mode string"""
@@ -535,7 +541,7 @@ def generate(
                         logits = forward_with_noise_level(model, x, **fwd_args)
 
             # --- BRANCH 2: CLORA (New Logic) ---
-            elif finetuning_type == FINETUNING_TYPE.CLORA:
+            elif TYPE_CLORA is not None and finetuning_type == TYPE_CLORA:
                 
                 def get_clora_args(batch_mask_index, raw_noise_level):
                     """CLoRA-specific argument resolver based on input_components list"""
@@ -592,7 +598,7 @@ def generate(
                         fwd_args = get_clora_args(mask_index, noise_level)
                         logits = forward_with_noise_level(model, x, **fwd_args)
             # --- BRANCH 3: NARA (New Logic) ---
-            elif finetuning_type == FINETUNING_TYPE.NARA:
+            elif TYPE_NARA is not None and finetuning_type == TYPE_NARA:
                 
                 def get_nara_args(batch_mask_index, raw_noise_level):
                     """CLoRA-specific argument resolver based on input_components list"""
@@ -649,7 +655,7 @@ def generate(
                         fwd_args = get_nara_args(mask_index, noise_level)
                         logits = forward_with_noise_level(model, x, **fwd_args)
             # --- BRANCH 3: TLORA / TNORA (Original Logic) ---
-            elif finetuning_type in (FINETUNING_TYPE.TLORA, FINETUNING_TYPE.TNORA):
+            elif (TYPE_TLORA is not None or TYPE_TNORA is not None) and finetuning_type in (TYPE_TLORA, TYPE_TNORA):
                 if cfg_scale > 0.0:
                     un_x = x.clone()
                     if not direct_noise:
@@ -698,7 +704,7 @@ def generate(
                         )
 
             # --- BRANCH 4: DORA_V2 (uses simple set_context_state with noise_level only) ---
-            elif finetuning_type == FINETUNING_TYPE.DORA_V2:
+            elif TYPE_DORA_V2 is not None and finetuning_type == TYPE_DORA_V2:
                 if cfg_scale > 0.0:
                     un_x = x.clone()
                     if not direct_noise:

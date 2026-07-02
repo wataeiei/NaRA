@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import re
-import os
 import warnings
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -203,14 +202,6 @@ class NARAConfig(PeftConfig):
     # LoRA sizes/targets
     r_ab: int = field(default=8)
     target_modules: Optional[Union[List[str], str]] = field(default=None)
-    skip_layer_regex: Optional[str] = field(
-        default=None,
-        metadata={"help": "Regex for module names that should NOT receive NARA adapters."},
-    )
-    skip_layers: Optional[str] = field(
-        default=None,
-        metadata={"help": "Layer indexes/ranges to skip, e.g. 8-23,30."},
-    )
 
     # core LoRA knobs
     lora_alpha: int = field(default=32)
@@ -303,58 +294,6 @@ class NARAConfig(PeftConfig):
                 # If target_modules is a regex string, static list comparison is difficult; just print a warning
                 warnings.warn("target_modules is a string/regex, skipping strict coverage check for mapper_groups.")
         # [End of validation checks] --------------------------------------------
-
-
-
-def _nara_parse_skip_layers(spec: Optional[str]) -> set[int]:
-    """Parse a spec like "8-23,30" into a set of layer indexes."""
-    if not spec:
-        return set()
-    out: set[int] = set()
-    for part in str(spec).split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            start, end = part.split("-", 1)
-            out.update(range(int(start), int(end) + 1))
-        else:
-            out.add(int(part))
-    return out
-
-
-def _nara_layer_index_from_key(key: str) -> Optional[int]:
-    """Extract a transformer layer index from common module-name styles."""
-    patterns = [
-        r"(?:^|\.)layers\.(\d+)(?:\.|$)",
-        r"(?:^|\.)layer\.(\d+)(?:\.|$)",
-        r"(?:^|\.)blocks\.(\d+)(?:\.|$)",
-        r"(?:^|\.)block\.(\d+)(?:\.|$)",
-        r"(?:^|\.)h\.(\d+)(?:\.|$)",
-        r"(?:^|\.)decoder\.layers\.(\d+)(?:\.|$)",
-        r"(?:^|\.)encoder\.layers\.(\d+)(?:\.|$)",
-    ]
-    for pat in patterns:
-        m = re.search(pat, key)
-        if m:
-            return int(m.group(1))
-    return None
-
-
-def _nara_should_skip_key(key: str, lcfg) -> bool:
-    """Return True when this target module should not receive a NARA adapter."""
-    regex = getattr(lcfg, "skip_layer_regex", None) or os.environ.get("NARA_SKIP_LAYER_REGEX")
-    if regex and re.search(regex, key):
-        return True
-
-    skip_layers = _nara_parse_skip_layers(os.environ.get("NARA_SKIP_LAYERS"))
-    if not skip_layers:
-        skip_layers = _nara_parse_skip_layers(getattr(lcfg, "skip_layers", None))
-    if skip_layers:
-        layer_idx = _nara_layer_index_from_key(key)
-        return layer_idx in skip_layers
-
-    return False
 
 # ---------------------------------------------------------------------
 # Model wrapper
@@ -837,15 +776,6 @@ class NARAModel(nn.Module):
  
             if not target_module_found:
                 continue
-
-            if _nara_should_skip_key(key, lcfg):
-                if os.environ.get("NARA_DEBUG_SKIP_LAYERS"):
-                    print(f"[NARA skip] {key}")
-                continue
-
-            if os.environ.get("NARA_DEBUG_TARGETS"):
-                print(f"[NARA target] {key}")
-
  
             is_target_modules_in_base_model = True
             parent, target, target_name = _get_submodules(self.model, key)

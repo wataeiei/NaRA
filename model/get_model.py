@@ -47,8 +47,14 @@ def get_nara_models(model_type, config):
 
     from nara import PeftModel as NARAPeftModel, NARAConfig, get_peft_model as get_nara_peft_model
 
+    # base_model = AutoModel.from_pretrained(
+    #     MODEL_PATHS_MAPPING[model_type], trust_remote_code=True
+    # )
     base_model = AutoModel.from_pretrained(
-        MODEL_PATHS_MAPPING[model_type], trust_remote_code=True
+        MODEL_PATHS_MAPPING[model_type],
+        trust_remote_code=True,
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True,
     )
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_PATHS_MAPPING[model_type], trust_remote_code=True

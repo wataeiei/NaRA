@@ -1,3 +1,6 @@
+paths:
+  experiment: /mnt/NaRA/experiments
+
 # Training mode configuration
 model: 'llada_instruct'
 finetuning_method: 'nara'

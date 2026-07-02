@@ -120,7 +120,7 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
         
 
     # --- 2. NOISE-BASED LORA LOGIC (TLORA, NORA, CLORA, NARA) ---
-    elif finetuning_type in [FINETUNING_TYPE.TLORA, FINETUNING_TYPE.NORA, FINETUNING_TYPE.TNORA, FINETUNING_TYPE.CLORA, FINETUNING_TYPE.NARA]:
+    elif finetuning_type == FINETUNING_TYPE.NARA:
             real_model = denoiser.module if hasattr(denoiser, "module") else denoiser
             peft_cfg = real_model.peft_config['default']
             
@@ -136,7 +136,7 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
                 calculated_nl = masked_indices_float.mean(dim=1, keepdim=True)
                 
             # Logic for CLORA
-            if finetuning_type in (FINETUNING_TYPE.CLORA,):
+            if False:
                 input_components = getattr(peft_cfg, "input_components", [])
                 if "nl" in input_components:
                     current_nl = calculated_nl
@@ -144,7 +144,7 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
                     radius = getattr(peft_cfg, "density_radius", None)
                     current_nd = calculate_global_mask_density(masked_indices, r=radius)
                     
-            elif finetuning_type in (FINETUNING_TYPE.NARA,):
+            elif finetuning_type == FINETUNING_TYPE.NARA:
                 input_mode = getattr(peft_cfg, "input_mode", "nl")
                 if input_mode == "constant":
                     # Constant mode: no noise info needed
@@ -203,11 +203,12 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
     else:
         logits = denoiser(noisy_batch).logits
         # import pdb; pdb.set_trace()
-    if finetuning_type in (FINETUNING_TYPE.PTUNING,FINETUNING_TYPE.PROMPT_TUNING,):
+    if finetuning_type in [getattr(FINETUNING_TYPE, 'PTUNING', None), getattr(FINETUNING_TYPE, 'PROMPT_TUNING', None)]:
         num_virtual_tokens = config.finetuning_parameters.get("num_virtual_tokens",None)
         logits = logits[:, num_virtual_tokens:, :]
-    token_loss = F.cross_entropy(logits[masked_indices], input_ids[masked_indices], reduction="none") / answer_length
-        
+# 修改后：给 input_ids[masked_indices] 加上 .long()
+    token_loss = F.cross_entropy(logits[masked_indices], input_ids[masked_indices].long(), reduction="none") / answer_length
+
     use_cross_entropy = config.eval.get("use_cross_entropy", False) if hasattr(config, "eval") else False
     # import pdb; pdb.set_trace()
     if use_cross_entropy:
@@ -225,7 +226,7 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
     # We return the noise data so the main loop can cache it if needed
     noise_data_payload = (noisy_batch, masked_indices, ratios)
     # Construct Return Dictionary
-    if finetuning_type in [FINETUNING_TYPE.TLORA, FINETUNING_TYPE.NORA, FINETUNING_TYPE.TNORA, FINETUNING_TYPE.CLORA, FINETUNING_TYPE.DORA_V2]:
+    if False:
         losses = {
             "loss": token_loss.sum()/ratios,
             "noise_level": noise_level_for_loss, 

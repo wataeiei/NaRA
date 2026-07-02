@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import Dict, Any
 import re
 from tqdm import tqdm
-from fraction import Fraction
+from fractions import Fraction
 import math
 from accelerate import Accelerator
 
