@@ -1,4 +1,7 @@
 import os
+import csv
+import json
+import time
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HUGGINGFACE_HUB_CACHE"] = "/root/hf_cache"
@@ -37,6 +40,15 @@ def main(args):
         print(f"[CONFIG] Overriding lr from command line: {args.lr}")
 
     accelerator, output_dir = get_accelerator(config)
+    if args.save_dir:
+        output_dir = os.path.abspath(args.save_dir)
+        os.makedirs(output_dir, exist_ok=True)
+        if accelerator.is_main_process:
+            print(f"[CKPT] Overriding checkpoint output_dir: {output_dir}")
+    metrics_dir = os.path.abspath(args.metrics_dir) if args.metrics_dir else os.path.join(output_dir, "metrics")
+    if accelerator.is_main_process:
+        os.makedirs(metrics_dir, exist_ok=True)
+        print(f"[METRICS] Writing training metrics to: {metrics_dir}")
 
     os.environ["WANDB_DIR"] = os.path.join(
         config.paths.experiment, config.train.exp_name
@@ -94,6 +106,7 @@ def main(args):
         "global_update_number": config.train.get("global_update_number") or 0,
         "global_epoch": config.train.get("global_epoch") or 0,
     }
+    training_start_time = time.time()
 
     # ========= Helper: evaluate val loss for a list of fixed noise ratios =========
     def _eval_val_loss_over_noise_levels(
@@ -173,12 +186,68 @@ def main(args):
 
         return results
 
-    def _save_model_to(save_path: str):
-        if not accelerator.is_main_process or DEBUG:
+    save_allowed = (not DEBUG) or args.force_save_debug
+
+    def _gpu_metrics() -> Dict[str, float]:
+        if not torch.cuda.is_available():
+            return {
+                "gpu_mem_allocated_gb": 0.0,
+                "gpu_mem_reserved_gb": 0.0,
+                "gpu_peak_allocated_gb": 0.0,
+                "gpu_peak_reserved_gb": 0.0,
+            }
+        return {
+            "gpu_mem_allocated_gb": round(torch.cuda.memory_allocated() / 1e9, 4),
+            "gpu_mem_reserved_gb": round(torch.cuda.memory_reserved() / 1e9, 4),
+            "gpu_peak_allocated_gb": round(torch.cuda.max_memory_allocated() / 1e9, 4),
+            "gpu_peak_reserved_gb": round(torch.cuda.max_memory_reserved() / 1e9, 4),
+        }
+
+    def _append_jsonl(filename: str, row: Dict):
+        if not accelerator.is_main_process:
+            return
+        path = os.path.join(metrics_dir, filename)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def _append_csv(filename: str, row: Dict):
+        if not accelerator.is_main_process:
+            return
+        path = os.path.join(metrics_dir, filename)
+        file_exists = os.path.isfile(path)
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+
+    def _record_event(event: str, **payload):
+        row = {
+            "event": event,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "elapsed_sec": round(time.time() - training_start_time, 3),
+            "global_step": state["global_step"],
+            "global_update_number": state["global_update_number"],
+            "global_sample_number": state["global_sample_number"],
+            "global_token_number": state["global_token_number"],
+            **_gpu_metrics(),
+            **payload,
+        }
+        _append_jsonl("train_events.jsonl", row)
+
+    def _record_checkpoint(tag: str, save_path: str):
+        if not accelerator.is_main_process:
+            return
+        index_path = os.path.join(output_dir, "CHECKPOINTS.txt")
+        with open(index_path, "a", encoding="utf-8") as f:
+            f.write(f"{tag}\t{save_path}\n")
+        _record_event("checkpoint", tag=tag, path=save_path)
+
+    def _save_model_to(save_path: str, tag: str):
+        if not accelerator.is_main_process or not save_allowed:
             return
         optimizer.zero_grad(set_to_none=True)
         torch.cuda.empty_cache()
-        accelerator.wait_for_everyone()
 
         unwrapped = accelerator.unwrap_model(denoiser)
         # CPU state_dict to avoid OOM
@@ -196,6 +265,7 @@ def main(args):
         except Exception:
             pass
         print(f"[CKPT] Saved to: {save_path}")
+        _record_checkpoint(tag, save_path)
 
     # ==== BEST-CKPT: tracking best metric and ckpt path
     metric_name = config.train.eval.metric  # "accuracy" or "loss"
@@ -212,7 +282,7 @@ def main(args):
 
     def _save_best_ckpt(curr_metric):
         nonlocal best_metric, best_ckpt_path, best_update_number
-        if not accelerator.is_main_process or DEBUG:
+        if not accelerator.is_main_process or not save_allowed:
             return
 
         # keep only one best
@@ -225,7 +295,7 @@ def main(args):
         tag_metric = f"{curr_metric:.6f}"
         save_dir_name = f"BEST_{metric_name}_{tag_metric}_seed_{args.seed}_update_{state['global_update_number']}_epoch_{epoch_num}"
         save_path = os.path.join(output_dir, save_dir_name)
-        _save_model_to(save_path)
+        _save_model_to(save_path, tag="best")
 
         best_metric = curr_metric
         best_ckpt_path = save_path
@@ -233,11 +303,11 @@ def main(args):
         print(f"[BEST-CKPT] Saved: {save_dir_name}")
 
     def _save_final_ckpt():
-        if not accelerator.is_main_process or DEBUG:
+        if not accelerator.is_main_process or not save_allowed:
             return
         final_dir_name = f"FINAL_seed_{args.seed}_epoch_{epoch_num}_update_{state['global_update_number']}"
         final_path = os.path.join(output_dir, final_dir_name)
-        _save_model_to(final_path)
+        _save_model_to(final_path, tag="final")
 
         try:
             latest_link = os.path.join(output_dir, "latest_final")
@@ -252,6 +322,37 @@ def main(args):
         # Auto-update ckpt_mapping if specified
         if args.ckpt_mapping:
             _update_ckpt_mapping(final_path)
+
+    def _save_periodic_ckpt():
+        if not accelerator.is_main_process or not save_allowed:
+            return
+        if not args.save_every_updates:
+            return
+        if state["global_update_number"] <= 0:
+            return
+        if state["global_update_number"] % args.save_every_updates != 0:
+            return
+        save_dir_name = f"UPDATE_{state['global_update_number']}_seed_{args.seed}_epoch_{epoch_num}"
+        save_path = os.path.join(output_dir, save_dir_name)
+        if os.path.isdir(save_path):
+            return
+        _save_model_to(save_path, tag="periodic")
+
+    def _save_stop_ckpt():
+        if not accelerator.is_main_process or not save_allowed:
+            return
+        save_dir_name = f"STOP_UPDATE_{state['global_update_number']}_seed_{args.seed}_epoch_{epoch_num}"
+        save_path = os.path.join(output_dir, save_dir_name)
+        if os.path.isdir(save_path):
+            return
+        _save_model_to(save_path, tag="stop")
+
+    def _sync_stop_training(value: bool) -> bool:
+        if dist.is_available() and dist.is_initialized():
+            flag = torch.tensor(1 if value else 0, device=accelerator.device)
+            dist.broadcast(flag, src=0)
+            return bool(flag.item())
+        return value
 
     def _update_ckpt_mapping(final_ckpt_path: str):
         """Update ckpt_mapping.py with the FINAL checkpoint path (with file lock for concurrency)"""
@@ -573,11 +674,11 @@ def main(args):
         fixed_noise_levels = None
 
     # ---- Experiment Logging: Start timing and reset VRAM stats ----
-    import time
     from datetime import datetime
 
-    training_start_time = time.time()
     torch.cuda.reset_peak_memory_stats()
+    stop_training = False
+    last_update_time = time.time()
 
     # Store initial config for CSV logging
     exp_config = {
@@ -632,6 +733,12 @@ def main(args):
                             total_correct / total_samples if total_samples > 0 else 0.0
                         )
                         logs["val_accuracy"] = accuracy
+                        _record_event(
+                            "eval",
+                            metric_name="accuracy",
+                            metric_value=accuracy,
+                            val_accuracy=accuracy,
+                        )
 
                         # ==== BEST-CKPT: save if better
                         if _is_better(accuracy, best_metric):
@@ -695,6 +802,12 @@ def main(args):
                                     )
                             logs["val_loss"] = logs["val_loss"] / (len(dataloaders["val"])*(config.train.eval.eval_epoches_num))
                             eval_progress_bar.close()
+                            _record_event(
+                                "eval",
+                                metric_name="loss",
+                                metric_value=logs["val_loss"],
+                                val_loss=logs["val_loss"],
+                            )
 
                             # ==== BEST-CKPT: save if better (lower loss)
                             if _is_better(logs["val_loss"], best_metric):
@@ -790,6 +903,7 @@ def main(args):
             accelerator.wait_for_everyone()
 
             if accelerator.sync_gradients and accelerator.is_main_process:
+                now = time.time()
                 avg_loss_per_update = accum_loss / accum_count
                 accum_loss = 0.0
                 accum_count = 0
@@ -800,6 +914,35 @@ def main(args):
                         step=state["global_step"],
                     )
                 state["global_update_number"] += 1
+                update_row = {
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "elapsed_sec": round(now - training_start_time, 3),
+                    "update_duration_sec": round(now - last_update_time, 3),
+                    "epoch": epoch_num,
+                    "batch_num": batch_num,
+                    "global_step": state["global_step"],
+                    "global_update_number": state["global_update_number"],
+                    "global_sample_number": state["global_sample_number"],
+                    "global_token_number": state["global_token_number"],
+                    "loss": logged_loss,
+                    "avg_loss_per_update": avg_loss_per_update,
+                    "lr": optimizer.param_groups[0]["lr"],
+                    "best_metric": best_metric,
+                    "best_update_number": best_update_number,
+                    **_gpu_metrics(),
+                }
+                if len(optimizer.param_groups) > 1:
+                    update_row["lr_c_mapper"] = optimizer.param_groups[1]["lr"]
+                _append_jsonl("train_updates.jsonl", update_row)
+                _append_csv("train_updates.csv", update_row)
+                last_update_time = now
+                _save_periodic_ckpt()
+
+                if args.stop_after_updates and state["global_update_number"] >= args.stop_after_updates:
+                    _save_stop_ckpt()
+                    print(f"[STOP] Reached --stop_after_updates={args.stop_after_updates}; stopping training.")
+                    _record_event("stop", reason="stop_after_updates", stop_after_updates=args.stop_after_updates)
+                    stop_training = True
 
 
                 if config.finetuning_method in ("clora","nara") and stage_1_limit_step > 0:
@@ -822,8 +965,13 @@ def main(args):
                 }
             )
             accelerator.wait_for_everyone()
+            stop_training = _sync_stop_training(stop_training)
+            if stop_training:
+                break
 
         # Debug mode: stop after first epoch
+        if stop_training:
+            break
         if args.debug:
             if accelerator.is_main_process:
                 print(f"[DEBUG] Stopping after epoch {epoch_num} (debug mode)")
@@ -868,6 +1016,14 @@ def main(args):
             "peak_vram_gb": round(peak_vram_gb, 2),
             "train_time_min": round(total_time_min, 1),
             "time_per_epoch_min": round(time_per_epoch, 1),
+            "completed_updates": state["global_update_number"],
+            "completed_samples": state["global_sample_number"],
+            "completed_tokens": state["global_token_number"],
+            "updates_per_min": round(state["global_update_number"] / max(total_time_min, 1e-9), 4),
+            "samples_per_sec": round(state["global_sample_number"] / max(total_time_min * 60, 1e-9), 4),
+            "tokens_per_sec": round(state["global_token_number"] / max(total_time_min * 60, 1e-9), 4),
+            "output_dir": output_dir,
+            "metrics_dir": metrics_dir,
             "best_loss": best_metric,
             "best_step": best_update_number,
             "final_loss": final_val_loss,
@@ -881,6 +1037,11 @@ def main(args):
         for k, v in csv_row.items():
             print(f"  {k}: {v}")
         print("="*60 + "\n")
+        summary_path = os.path.join(metrics_dir, "train_summary.json")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(csv_row, f, ensure_ascii=False, indent=2)
+        _record_event("summary", summary_path=summary_path)
+        print(f"[METRICS] Training summary saved to: {summary_path}")
 
         # Save to CSV
         results_dir = config.paths.get("results_dir", "")
@@ -916,6 +1077,11 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate from config")
     parser.add_argument("--ckpt_mapping", type=str, default=None, help="Path to ckpt_mapping.py for auto-update after training")
     parser.add_argument("--debug", action="store_true", help="Debug mode: process at most 5 batches then stop")
+    parser.add_argument("--save_dir", type=str, default=None, help="Explicit checkpoint output directory. Use this to save comparable full/freeze checkpoints under outputs/.")
+    parser.add_argument("--metrics_dir", type=str, default=None, help="Directory for train_updates.csv/jsonl, train_events.jsonl, and train_summary.json. Defaults to <save_dir>/metrics.")
+    parser.add_argument("--save_every_updates", type=int, default=None, help="Save a checkpoint every N optimizer updates, useful for same-step full/freeze comparison.")
+    parser.add_argument("--stop_after_updates", type=int, default=None, help="Automatically save and stop after N optimizer updates.")
+    parser.add_argument("--force_save_debug", action="store_true", help="Allow checkpoint saving even when global DEBUG is True.")
     args = parser.parse_args()
     set_seed(args.seed)
     main(args)

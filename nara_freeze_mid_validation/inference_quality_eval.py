@@ -38,29 +38,42 @@ import argparse
 import json
 import os
 import re
+import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import torch
-import yaml
 
 
 PROMPT_KEYS = ("prompt", "question", "instruction", "input", "query")
 REF_KEYS = ("answer", "output", "response", "target", "reference", "label")
 
 
-def to_namespace(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        return SimpleNamespace(**{k: to_namespace(v) for k, v in obj.items()})
-    if isinstance(obj, list):
-        return [to_namespace(x) for x in obj]
-    return obj
+def gpu_metrics() -> dict[str, float]:
+    if not torch.cuda.is_available():
+        return {
+            "gpu_mem_allocated_gb": 0.0,
+            "gpu_mem_reserved_gb": 0.0,
+            "gpu_peak_allocated_gb": 0.0,
+            "gpu_peak_reserved_gb": 0.0,
+        }
+    return {
+        "gpu_mem_allocated_gb": round(torch.cuda.memory_allocated() / 1e9, 4),
+        "gpu_mem_reserved_gb": round(torch.cuda.memory_reserved() / 1e9, 4),
+        "gpu_peak_allocated_gb": round(torch.cuda.max_memory_allocated() / 1e9, 4),
+        "gpu_peak_reserved_gb": round(torch.cuda.max_memory_reserved() / 1e9, 4),
+    }
+
+
+def cuda_sync() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
 def read_config(path: Path) -> Any:
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return to_namespace(raw)
+    from omegaconf import OmegaConf
+
+    return OmegaConf.load(path)
 
 
 def read_jsonl(path: Path, max_samples: int | None) -> list[dict[str, Any]]:
@@ -156,6 +169,23 @@ def get_generate_owner(model):
     raise AttributeError("Neither model nor model.model has generate(). Use your repo's inference function here.")
 
 
+def infer_finetuning_type(config):
+    from config import FINETUNING_TYPE, get_type
+
+    return get_type(FINETUNING_TYPE, config.get("finetuning_method", None))
+
+
+def get_eval_defaults(config) -> dict[str, Any]:
+    train_eval = config.get("train", {}).get("eval", {})
+    return {
+        "steps": int(train_eval.get("steps", 128)),
+        "gen_length": int(train_eval.get("gen_length", 128)),
+        "block_length": int(train_eval.get("block_length", 128)),
+        "cfg_scale": float(train_eval.get("cfg_scale", 0.0)),
+        "remasking": str(train_eval.get("remasking", "low_confidence")),
+    }
+
+
 @torch.inference_mode()
 def generate_one(
     model,
@@ -164,11 +194,59 @@ def generate_one(
     max_new_tokens: int,
     temperature: float,
     top_p: float,
+    *,
+    backend: str,
+    finetuning_type: Any,
+    direct_noise: bool,
+    steps: int,
+    block_length: int,
+    cfg_scale: float,
+    remasking: str,
+    mask_id: int,
+    random_noise: bool,
+    till_eos: bool,
 ) -> str:
-    owner = get_generate_owner(model)
     inputs = tokenizer(prompt, return_tensors="pt")
-    device = next(owner.parameters()).device
+    device = next(unwrap_model(model).parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    if backend in ("llada", "auto"):
+        try:
+            from eval.llada_generate import generate as llada_generate
+
+            prompt_ids = inputs["input_ids"]
+            gen_length = max_new_tokens
+            if gen_length % block_length != 0:
+                gen_length = ((gen_length + block_length - 1) // block_length) * block_length
+            steps = max(1, steps)
+            num_blocks = max(1, gen_length // block_length)
+            if steps % num_blocks != 0:
+                steps = ((steps + num_blocks - 1) // num_blocks) * num_blocks
+
+            output_ids = llada_generate(
+                model,
+                tokenizer,
+                finetuning_type,
+                direct_noise,
+                prompt_ids,
+                steps=steps,
+                gen_length=gen_length,
+                block_length=block_length,
+                temperature=temperature,
+                cfg_scale=cfg_scale,
+                remasking=remasking,
+                mask_id=mask_id,
+                is_main_process=True,
+                random_noise=random_noise,
+                till_eos=till_eos,
+            )
+            gen_ids = output_ids[0][prompt_ids.shape[1] :]
+            return tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+        except Exception:
+            if backend == "llada":
+                raise
+
+    owner = get_generate_owner(model)
 
     kwargs = {
         "max_new_tokens": max_new_tokens,
@@ -233,15 +311,28 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--backend", choices=("auto", "llada", "hf"), default="auto")
+    parser.add_argument("--steps", type=int, default=None)
+    parser.add_argument("--block-length", type=int, default=None)
+    parser.add_argument("--cfg-scale", type=float, default=None)
+    parser.add_argument("--remasking", default=None)
+    parser.add_argument("--mask-id", type=int, default=126336)
+    parser.add_argument("--direct-noise", action="store_true")
+    parser.add_argument("--random-noise", action="store_true")
+    parser.add_argument("--till-eos", action="store_true")
     parser.add_argument("--noise-level", type=float, default=0.5)
     parser.add_argument("--noise-density", type=float, default=None)
     parser.add_argument("--bertscore", action="store_true")
     parser.add_argument("--bertscore-lang", default="zh")
+    parser.add_argument("--timing-out", default=None)
     args = parser.parse_args()
 
     from model.get_model import get_model_by_config
 
+    total_start = time.perf_counter()
     config = read_config(Path(args.config))
+    eval_defaults = get_eval_defaults(config)
+    finetuning_type = infer_finetuning_type(config)
     model, tokenizer = get_model_by_config(config)
     model.eval()
     if torch.cuda.is_available():
@@ -249,32 +340,101 @@ def main() -> None:
 
     load_checkpoint_if_given(model, args.checkpoint, args.adapter_name)
     set_nara_context(model, args.noise_level, args.noise_density)
+    cuda_sync()
+    model_ready_sec = time.perf_counter() - total_start
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
     rows = read_jsonl(Path(args.data), args.max_samples)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    timing_path = Path(args.timing_out) if args.timing_out else Path(args.out).with_suffix(".timing.jsonl")
+    timing_path.parent.mkdir(parents=True, exist_ok=True)
 
     preds: list[str] = []
     refs: list[str] = []
-    with Path(args.out).open("w", encoding="utf-8") as f:
+    total_generation_sec = 0.0
+    total_prompt_tokens = 0
+    total_prediction_tokens = 0
+    with Path(args.out).open("w", encoding="utf-8") as f, timing_path.open("w", encoding="utf-8") as tf:
         for idx, row in enumerate(rows):
             prompt = format_prompt(pick_text(row, PROMPT_KEYS))
             ref = pick_text(row, REF_KEYS)
-            pred = generate_one(model, tokenizer, prompt, args.max_new_tokens, args.temperature, args.top_p)
+            prompt_tokens = len(tokenizer(prompt)["input_ids"])
+            cuda_sync()
+            sample_start = time.perf_counter()
+            pred = generate_one(
+                model,
+                tokenizer,
+                prompt,
+                args.max_new_tokens,
+                args.temperature,
+                args.top_p,
+                backend=args.backend,
+                finetuning_type=finetuning_type,
+                direct_noise=args.direct_noise,
+                steps=args.steps or eval_defaults["steps"],
+                block_length=args.block_length or eval_defaults["block_length"],
+                cfg_scale=args.cfg_scale if args.cfg_scale is not None else eval_defaults["cfg_scale"],
+                remasking=args.remasking or eval_defaults["remasking"],
+                mask_id=args.mask_id,
+                random_noise=args.random_noise,
+                till_eos=args.till_eos,
+            )
+            cuda_sync()
+            generation_sec = time.perf_counter() - sample_start
+            pred_tokens = len(tokenizer(pred)["input_ids"]) if pred else 0
+            total_generation_sec += generation_sec
+            total_prompt_tokens += prompt_tokens
+            total_prediction_tokens += pred_tokens
             preds.append(pred)
             refs.append(ref)
             out_row = dict(row)
             out_row["prediction"] = pred
+            out_row["generation_sec"] = generation_sec
+            out_row["prompt_tokens"] = prompt_tokens
+            out_row["prediction_tokens"] = pred_tokens
             f.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+            timing_row = {
+                "idx": idx,
+                "generation_sec": generation_sec,
+                "prompt_tokens": prompt_tokens,
+                "prediction_tokens": pred_tokens,
+                "prediction_tokens_per_sec": pred_tokens / max(generation_sec, 1e-9),
+                **gpu_metrics(),
+            }
+            tf.write(json.dumps(timing_row, ensure_ascii=False) + "\n")
             print(f"[{idx + 1}/{len(rows)}] pred={pred[:80]!r} ref={ref[:80]!r}")
 
     metrics = simple_metrics(preds, refs)
+    bertscore_start = time.perf_counter()
     if args.bertscore:
         metrics.update(bertscore_metrics(preds, refs, args.bertscore_lang))
+    bertscore_sec = time.perf_counter() - bertscore_start if args.bertscore else 0.0
+    total_sec = time.perf_counter() - total_start
+    metrics.update(
+        {
+            "num_samples": len(rows),
+            "model_ready_sec": model_ready_sec,
+            "total_wall_sec": total_sec,
+            "total_generation_sec": total_generation_sec,
+            "avg_generation_sec": total_generation_sec / max(len(rows), 1),
+            "bertscore_sec": bertscore_sec,
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_prediction_tokens": total_prediction_tokens,
+            "prediction_tokens_per_sec": total_prediction_tokens / max(total_generation_sec, 1e-9),
+            "samples_per_sec_generation": len(rows) / max(total_generation_sec, 1e-9),
+            "config": args.config,
+            "checkpoint": args.checkpoint,
+            "backend": args.backend,
+            **gpu_metrics(),
+        }
+    )
 
     metrics_path = Path(args.out).with_suffix(".metrics.json")
     metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
     print(f"[eval] predictions: {args.out}")
+    print(f"[eval] timing: {timing_path}")
     print(f"[eval] metrics: {metrics_path}")
 
 
