@@ -30,3 +30,25 @@ build/
 *antsec*
 AkC25A74Sq.*
 \!antsec-win-starpoint*
+
+# experiment artifacts
+outputs/
+logs/
+data/math14k_val_200.jsonl
+data/test.jsonl
+*.metrics.json
+*.timing.jsonl
+*.numeric_metrics.json
+*.numeric_scored.jsonl
+*.numeric_errors.jsonl
+
+# experiment artifacts
+outputs/
+logs/
+data/math14k_val_200.jsonl
+data/test.jsonl
+*.metrics.json
+*.timing.jsonl
+*.numeric_metrics.json
+*.numeric_scored.jsonl
+*.numeric_errors.jsonl
