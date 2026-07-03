@@ -981,8 +981,6 @@ def main(args):
 
     # ---- Experiment Logging: Save results to CSV ----
     if accelerator.is_main_process:
-        import csv
-
         # Calculate training metrics
         total_time_min = (time.time() - training_start_time) / 60
         peak_vram_gb = torch.cuda.max_memory_allocated() / 1e9
