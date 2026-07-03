@@ -113,6 +113,13 @@ def unwrap_model(model):
 
 
 def find_checkpoint_file(path: Path) -> Path:
+    if not path.exists() and path.name == "latest_final":
+        marker = path.parent / "LATEST_FINAL.txt"
+        if marker.exists():
+            target = marker.read_text(encoding="utf-8").strip()
+            if target:
+                path = path.parent / target
+
     if path.is_file():
         return path
     candidates = [
@@ -127,9 +134,35 @@ def find_checkpoint_file(path: Path) -> Path:
         p = path / name
         if p.exists():
             return p
-    nested = sorted(path.glob("**/adapter_model.safetensors")) + sorted(path.glob("**/adapter_model.bin"))
+
+    marker = path / "LATEST_FINAL.txt"
+    if marker.exists():
+        target = marker.read_text(encoding="utf-8").strip()
+        if target:
+            try:
+                return find_checkpoint_file(path / target)
+            except FileNotFoundError:
+                pass
+
+    latest_link = path / "latest_final"
+    if latest_link.exists():
+        try:
+            return find_checkpoint_file(latest_link)
+        except FileNotFoundError:
+            pass
+
+    nested = []
+    for pattern in ("**/adapter_model.safetensors", "**/adapter_model.bin", "**/pytorch_model.bin", "**/checkpoint.pt", "**/checkpoint.pth"):
+        nested.extend(path.glob(pattern))
     if nested:
-        return nested[-1]
+        priority = {"STOP_UPDATE": 0, "FINAL": 1, "BEST": 2, "UPDATE": 3}
+
+        def rank(p: Path):
+            parts = set(p.parts)
+            folder_rank = min((v for k, v in priority.items() if any(part.startswith(k) for part in parts)), default=9)
+            return (folder_rank, -p.stat().st_mtime)
+
+        return sorted(nested, key=rank)[0]
     raise FileNotFoundError(f"No checkpoint file found under {path}")
 
 
