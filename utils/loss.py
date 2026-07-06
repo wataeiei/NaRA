@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import random
+import math
 
 from config import MODEL_TYPE, get_type, MASK_ID_MAPPING, FINETUNING_TYPE
 from .util import (
@@ -8,6 +9,71 @@ from .util import (
     random_forward_process,
     forward_with_noise_level,
 )
+
+def _get_nested(config, keys, default=None):
+    cur = config
+    for key in keys:
+        try:
+            cur = cur.get(key, default)
+        except AttributeError:
+            cur = getattr(cur, key, default)
+        if cur is default:
+            return default
+    return cur
+
+
+def _build_lift_a_supervision_mask(logits, input_ids, masked_indices, question_length, ratios, config):
+    """Approximate LIFT-A: select masked tokens for loss by confidence and noise regime."""
+    if not _get_nested(config, ["train", "lift", "enabled"], False):
+        return masked_indices
+
+    variant = str(_get_nested(config, ["train", "lift", "variant"], "lift_a")).lower()
+    if variant not in {"lift_a", "lifta"}:
+        raise ValueError(f"Unsupported LIFT variant for this implementation: {variant}")
+
+    H = float(_get_nested(config, ["train", "lift", "H"], 3))
+    if H < 2:
+        raise ValueError("train.lift.H must be >= 2")
+
+    select_fraction = float(_get_nested(config, ["train", "lift", "select_fraction"], 0.5))
+    select_fraction = min(1.0, max(0.0, select_fraction))
+    min_selected_tokens = int(_get_nested(config, ["train", "lift", "min_selected_tokens"], 1))
+
+    supervision_mask = torch.zeros_like(masked_indices)
+    with torch.no_grad():
+        probs = torch.softmax(logits.float(), dim=-1)
+        gt_conf = probs.gather(-1, input_ids.long().unsqueeze(-1)).squeeze(-1)
+
+        batch_size = input_ids.shape[0]
+        for b in range(batch_size):
+            token_idx = torch.nonzero(masked_indices[b], as_tuple=False).flatten()
+            num_masked = int(token_idx.numel())
+            if num_masked == 0:
+                continue
+
+            prompt_len = int(question_length[b].item()) if torch.is_tensor(question_length) else int(question_length)
+            answer_len = max(1, input_ids.shape[1] - prompt_len)
+            noise_t = float(num_masked) / float(answer_len)
+
+            if (1.0 / H) <= noise_t < (1.0 - 1.0 / H):
+                supervision_mask[b, token_idx] = True
+                continue
+
+            k = max(min_selected_tokens, math.ceil(num_masked * select_fraction))
+            k = min(num_masked, k)
+            conf = gt_conf[b, token_idx]
+
+            if noise_t < (1.0 / H):
+                # Low-noise inputs have enough context, so train harder low-confidence tokens.
+                chosen_local = torch.topk(conf, k=k, largest=False).indices
+            else:
+                # High-noise inputs have little context, so train easier high-confidence tokens.
+                chosen_local = torch.topk(conf, k=k, largest=True).indices
+
+            supervision_mask[b, token_idx[chosen_local]] = True
+
+    return supervision_mask
+
 
 def compute_loss_by_config(
     input_ids, denoiser, question_length, config, noise_ratio=None, cached_noise_data=None,answer_length=None
@@ -206,8 +272,20 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
     if finetuning_type in [getattr(FINETUNING_TYPE, 'PTUNING', None), getattr(FINETUNING_TYPE, 'PROMPT_TUNING', None)]:
         num_virtual_tokens = config.finetuning_parameters.get("num_virtual_tokens",None)
         logits = logits[:, num_virtual_tokens:, :]
-# 修改后：给 input_ids[masked_indices] 加上 .long()
-    token_loss = F.cross_entropy(logits[masked_indices], input_ids[masked_indices].long(), reduction="none") / answer_length
+    supervision_mask = _build_lift_a_supervision_mask(
+        logits=logits,
+        input_ids=input_ids,
+        masked_indices=masked_indices,
+        question_length=question_length,
+        ratios=ratios,
+        config=config,
+    )
+    if not torch.any(supervision_mask):
+        supervision_mask = masked_indices
+
+    token_loss = F.cross_entropy(logits[supervision_mask], input_ids[supervision_mask].long(), reduction="none") / answer_length
+    lift_selected_tokens = int(supervision_mask.sum().detach().item())
+    lift_masked_tokens = int(masked_indices.sum().detach().item())
 
     use_cross_entropy = config.eval.get("use_cross_entropy", False) if hasattr(config, "eval") else False
     # import pdb; pdb.set_trace()
@@ -217,8 +295,10 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
             compute_original_llada_loss.has_printed_ce_info = True
         losses = {
             "loss": token_loss.sum(),
-            "masked_indices": masked_indices,
+            "masked_indices": supervision_mask,
             "ratios": ratios,
+            "lift_selected_tokens": lift_selected_tokens,
+            "lift_masked_tokens": lift_masked_tokens,
         }
         return losses
     # Calculate final loss value    
@@ -230,15 +310,19 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
         losses = {
             "loss": token_loss.sum()/ratios,
             "noise_level": noise_level_for_loss, 
-            "masked_indices": masked_indices, 
-            "noise_data_cache": noise_data_payload 
+            "masked_indices": supervision_mask, 
+            "noise_data_cache": noise_data_payload,
+            "lift_selected_tokens": lift_selected_tokens,
+            "lift_masked_tokens": lift_masked_tokens,
         }
     else:
         # VarLenLoRA falls here (no noise level to log specific to the adapter)
         losses = {
             "loss": token_loss.sum()/ratios,
-            "masked_indices": masked_indices,
-            "noise_data_cache": noise_data_payload 
+            "masked_indices": supervision_mask,
+            "noise_data_cache": noise_data_payload,
+            "lift_selected_tokens": lift_selected_tokens,
+            "lift_masked_tokens": lift_masked_tokens,
         }
     return losses
 

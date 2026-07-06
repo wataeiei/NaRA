@@ -871,6 +871,8 @@ def main(args):
                 loss_tgt = losses["loss"]
                 if config.finetuning_method in ["tlora", "nora"]:
                     noise_level = losses["noise_level"]
+                lift_selected_tokens = losses.get("lift_selected_tokens", None)
+                lift_masked_tokens = losses.get("lift_masked_tokens", None)
                 torch.cuda.empty_cache()
                 accelerator.backward(loss_tgt)
                 if accelerator.sync_gradients:
@@ -931,6 +933,12 @@ def main(args):
                     "best_update_number": best_update_number,
                     **_gpu_metrics(),
                 }
+                if lift_selected_tokens is not None:
+                    update_row["lift_selected_tokens"] = lift_selected_tokens
+                    update_row["lift_masked_tokens"] = lift_masked_tokens
+                    update_row["lift_selected_ratio"] = round(
+                        lift_selected_tokens / max(lift_masked_tokens, 1), 6
+                    )
                 if len(optimizer.param_groups) > 1:
                     update_row["lr_c_mapper"] = optimizer.param_groups[1]["lr"]
                 _append_jsonl("train_updates.jsonl", update_row)
