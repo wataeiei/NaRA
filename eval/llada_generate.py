@@ -802,29 +802,24 @@ def generate(
             steps_bar.update(1)
             steps_bar.set_postfix({"Blocks": f"{num_block + 1}/{num_blocks}"})
             
-        if till_eos:
+        if till_current_eos:
             start_idx = prompt.shape[1] + num_block * block_length
             end_idx = prompt.shape[1] + (num_block + 1) * block_length
 
-            # 1. Check if we need to stop based on the PREVIOUS block's EOS
-            # If this flag is True, it means we have just finished generating 
-            # the "one extra block" requested.
-            if stop_after_current_block:
-                # Fill everything from the end of this block to the very end with EOS
+            if (x[:, start_idx:end_idx] == tokenizer.eos_token_id).any():
                 x[:, end_idx:] = tokenizer.eos_token_id
                 break
 
-            # 2. Check if the CURRENT block has EOS
-            # If found, we do NOT break yet. We set the flag so the loop 
-            # runs exactly one more time (for the next block).
-            
-            if (x[:, start_idx:end_idx] == tokenizer.eos_token_id).any():
-                stop_after_current_block = True
-        if till_current_eos:
+        elif till_eos:
+            start_idx = prompt.shape[1] + num_block * block_length
+            end_idx = prompt.shape[1] + (num_block + 1) * block_length
+
             if stop_after_current_block:
-                # import pdb; pdb.set_trace()
                 x[:, end_idx:] = tokenizer.eos_token_id
                 break
+
+            if (x[:, start_idx:end_idx] == tokenizer.eos_token_id).any():
+                stop_after_current_block = True
     return x
 
 def _get_adapter_name_from_noise(noise_ratio: float, num_bins: int) -> str:

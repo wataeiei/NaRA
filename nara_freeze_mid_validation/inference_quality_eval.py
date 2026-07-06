@@ -249,6 +249,7 @@ def generate_one(
     mask_id: int,
     random_noise: bool,
     till_eos: bool,
+    till_current_eos: bool,
 ) -> str:
     inputs = tokenizer(prompt, return_tensors="pt")
     device = next(unwrap_model(model).parameters()).device
@@ -283,6 +284,7 @@ def generate_one(
                 is_main_process=True,
                 random_noise=random_noise,
                 till_eos=till_eos,
+                till_current_eos=till_current_eos,
             )
             gen_ids = output_ids[0][prompt_ids.shape[1] :]
             return tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
@@ -364,6 +366,7 @@ def main() -> None:
     parser.add_argument("--direct-noise", action="store_true")
     parser.add_argument("--random-noise", action="store_true")
     parser.add_argument("--till-eos", action="store_true")
+    parser.add_argument("--till-current-eos", action="store_true")
     parser.add_argument("--noise-level", type=float, default=0.5)
     parser.add_argument("--noise-density", type=float, default=None)
     parser.add_argument("--bertscore", action="store_true")
@@ -423,6 +426,7 @@ def main() -> None:
                 mask_id=args.mask_id,
                 random_noise=args.random_noise,
                 till_eos=args.till_eos,
+                till_current_eos=args.till_current_eos,
             )
             cuda_sync()
             generation_sec = time.perf_counter() - sample_start
@@ -470,6 +474,10 @@ def main() -> None:
             "config": args.config,
             "checkpoint": args.checkpoint,
             "backend": args.backend,
+            "steps": args.steps or eval_defaults["steps"],
+            "block_length": args.block_length or eval_defaults["block_length"],
+            "till_eos": args.till_eos,
+            "till_current_eos": args.till_current_eos,
             **gpu_metrics(),
         }
     )
