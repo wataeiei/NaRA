@@ -28,7 +28,7 @@ def _build_lift_a_supervision_mask(logits, input_ids, masked_indices, question_l
         return masked_indices
 
     variant = str(_get_nested(config, ["train", "lift", "variant"], "lift_a")).lower()
-    if variant not in {"lift_a", "lifta"}:
+    if variant not in {"lift_a", "lifta", "nara_lift_a", "nara_lifta"}:
         raise ValueError(f"Unsupported LIFT variant for this implementation: {variant}")
 
     H = float(_get_nested(config, ["train", "lift", "H"], 3))
@@ -37,6 +37,12 @@ def _build_lift_a_supervision_mask(logits, input_ids, masked_indices, question_l
 
     select_fraction = float(_get_nested(config, ["train", "lift", "select_fraction"], 0.5))
     select_fraction = min(1.0, max(0.0, select_fraction))
+    low_noise_fraction = float(_get_nested(config, ["train", "lift", "low_noise_fraction"], select_fraction))
+    middle_fraction = float(_get_nested(config, ["train", "lift", "middle_fraction"], 1.0))
+    high_noise_fraction = float(_get_nested(config, ["train", "lift", "high_noise_fraction"], select_fraction))
+    low_noise_fraction = min(1.0, max(0.0, low_noise_fraction))
+    middle_fraction = min(1.0, max(0.0, middle_fraction))
+    high_noise_fraction = min(1.0, max(0.0, high_noise_fraction))
     min_selected_tokens = int(_get_nested(config, ["train", "lift", "min_selected_tokens"], 1))
 
     supervision_mask = torch.zeros_like(masked_indices)
@@ -55,18 +61,28 @@ def _build_lift_a_supervision_mask(logits, input_ids, masked_indices, question_l
             answer_len = max(1, input_ids.shape[1] - prompt_len)
             noise_t = float(num_masked) / float(answer_len)
 
-            if (1.0 / H) <= noise_t < (1.0 - 1.0 / H):
-                supervision_mask[b, token_idx] = True
-                continue
-
-            k = max(min_selected_tokens, math.ceil(num_masked * select_fraction))
-            k = min(num_masked, k)
             conf = gt_conf[b, token_idx]
 
+            if (1.0 / H) <= noise_t < (1.0 - 1.0 / H):
+                if variant in {"nara_lift_a", "nara_lifta"} and middle_fraction < 1.0:
+                    k = max(min_selected_tokens, math.ceil(num_masked * middle_fraction))
+                    k = min(num_masked, k)
+                    _, chosen_local = torch.topk(conf, k=k, largest=True)
+                    supervision_mask[b, token_idx[chosen_local]] = True
+                else:
+                    supervision_mask[b, token_idx] = True
+                continue
+
             if noise_t < (1.0 / H):
+                fraction = low_noise_fraction if variant in {"nara_lift_a", "nara_lifta"} else select_fraction
+                k = max(min_selected_tokens, math.ceil(num_masked * fraction))
+                k = min(num_masked, k)
                 # Low-noise inputs have enough context, so train harder low-confidence tokens.
                 chosen_local = torch.topk(conf, k=k, largest=False).indices
             else:
+                fraction = high_noise_fraction if variant in {"nara_lift_a", "nara_lifta"} else select_fraction
+                k = max(min_selected_tokens, math.ceil(num_masked * fraction))
+                k = min(num_masked, k)
                 # High-noise inputs have little context, so train easier high-confidence tokens.
                 chosen_local = torch.topk(conf, k=k, largest=True).indices
 
