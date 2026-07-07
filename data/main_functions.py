@@ -37,7 +37,17 @@ def get_dataloader(
     # Determine which split to load
     split_to_load = "test" if only_test else "train"
 
-    if "data_files" in task_info:
+    fixed_train_file = config.data.get("train_file", None) if hasattr(config, "data") else None
+    fixed_val_file = config.data.get("val_file", None) if hasattr(config, "data") else None
+
+    if fixed_train_file and (fixed_val_file or only_test):
+        data_files = {"train": fixed_train_file}
+        if fixed_val_file:
+            data_files["val"] = fixed_val_file
+        dataset = load_dataset("json", data_files=data_files, split="train")
+        dataset_val_fixed = load_dataset("json", data_files=data_files, split="val") if fixed_val_file else None
+
+    elif "data_files" in task_info:
 
         # Check if the split we want is defined
         if split_to_load not in task_info["data_files"]:
@@ -64,13 +74,17 @@ def get_dataloader(
 
     # 2. Train/val split
     if not only_test:
-        split_dataset = dataset.train_test_split(
-            test_size=config.data.val_split_size,
-            seed=config.data.val_split_seed,  # reproducibility
-            shuffle=True,
-        )
-        dataset_train = split_dataset["train"]
-        dataset_val = split_dataset["test"]
+        if fixed_train_file and fixed_val_file:
+            dataset_train = dataset
+            dataset_val = dataset_val_fixed
+        else:
+            split_dataset = dataset.train_test_split(
+                test_size=config.data.val_split_size,
+                seed=config.data.val_split_seed,  # reproducibility
+                shuffle=True,
+            )
+            dataset_train = split_dataset["train"]
+            dataset_val = split_dataset["test"]
 
     max_length: int = MAX_LENGTH_MAPPING[task_type]
 
