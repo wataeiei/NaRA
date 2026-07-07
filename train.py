@@ -873,6 +873,7 @@ def main(args):
                     noise_level = losses["noise_level"]
                 lift_selected_tokens = losses.get("lift_selected_tokens", None)
                 lift_masked_tokens = losses.get("lift_masked_tokens", None)
+                lift_weight_mean = losses.get("lift_weight_mean", None)
                 torch.cuda.empty_cache()
                 accelerator.backward(loss_tgt)
                 if accelerator.sync_gradients:
@@ -939,6 +940,8 @@ def main(args):
                     update_row["lift_selected_ratio"] = round(
                         lift_selected_tokens / max(lift_masked_tokens, 1), 6
                     )
+                    if lift_weight_mean is not None:
+                        update_row["lift_weight_mean"] = round(lift_weight_mean, 6)
                 if len(optimizer.param_groups) > 1:
                     update_row["lr_c_mapper"] = optimizer.param_groups[1]["lr"]
                 _append_jsonl("train_updates.jsonl", update_row)

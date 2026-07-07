@@ -28,6 +28,8 @@ def _build_lift_a_supervision_mask(logits, input_ids, masked_indices, question_l
         return masked_indices
 
     variant = str(_get_nested(config, ["train", "lift", "variant"], "lift_a")).lower()
+    if variant in {"weighted_nara_lift", "weighted_nara_lift_a", "weighted_nara_lifta"}:
+        return masked_indices
     if variant not in {"lift_a", "lifta", "nara_lift_a", "nara_lifta"}:
         raise ValueError(f"Unsupported LIFT variant for this implementation: {variant}")
 
@@ -89,6 +91,57 @@ def _build_lift_a_supervision_mask(logits, input_ids, masked_indices, question_l
             supervision_mask[b, token_idx[chosen_local]] = True
 
     return supervision_mask
+
+
+def _build_lift_token_weights(logits, input_ids, masked_indices, question_length, config):
+    if not _get_nested(config, ["train", "lift", "enabled"], False):
+        return None
+
+    variant = str(_get_nested(config, ["train", "lift", "variant"], "lift_a")).lower()
+    if variant not in {"weighted_nara_lift", "weighted_nara_lift_a", "weighted_nara_lifta"}:
+        return None
+
+    H = float(_get_nested(config, ["train", "lift", "H"], 3))
+    if H < 2:
+        raise ValueError("train.lift.H must be >= 2")
+
+    min_weight = float(_get_nested(config, ["train", "lift", "min_weight"], 0.5))
+    max_weight = float(_get_nested(config, ["train", "lift", "max_weight"], 1.5))
+    if min_weight <= 0 or max_weight <= 0 or max_weight < min_weight:
+        raise ValueError("train.lift requires 0 < min_weight <= max_weight")
+
+    weights = torch.ones_like(input_ids, dtype=logits.dtype)
+    with torch.no_grad():
+        probs = torch.softmax(logits.float(), dim=-1)
+        gt_conf = probs.gather(-1, input_ids.long().unsqueeze(-1)).squeeze(-1)
+
+        for b in range(input_ids.shape[0]):
+            token_idx = torch.nonzero(masked_indices[b], as_tuple=False).flatten()
+            num_masked = int(token_idx.numel())
+            if num_masked <= 1:
+                continue
+
+            prompt_len = int(question_length[b].item()) if torch.is_tensor(question_length) else int(question_length)
+            answer_len = max(1, input_ids.shape[1] - prompt_len)
+            noise_t = float(num_masked) / float(answer_len)
+
+            if (1.0 / H) <= noise_t < (1.0 - 1.0 / H):
+                continue
+
+            conf = gt_conf[b, token_idx]
+            conf_min = conf.min()
+            conf_span = (conf.max() - conf_min).clamp_min(1e-6)
+            norm_conf = (conf - conf_min) / conf_span
+
+            if noise_t < (1.0 / H):
+                token_weights = max_weight - norm_conf * (max_weight - min_weight)
+            else:
+                token_weights = min_weight + norm_conf * (max_weight - min_weight)
+
+            token_weights = token_weights / token_weights.mean().clamp_min(1e-6)
+            weights[b, token_idx] = token_weights.to(weights.dtype)
+
+    return weights
 
 
 def compute_loss_by_config(
@@ -300,6 +353,19 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
         supervision_mask = masked_indices
 
     token_loss = F.cross_entropy(logits[supervision_mask], input_ids[supervision_mask].long(), reduction="none") / answer_length
+    token_weights = _build_lift_token_weights(
+        logits=logits,
+        input_ids=input_ids,
+        masked_indices=supervision_mask,
+        question_length=question_length,
+        config=config,
+    )
+    if token_weights is not None:
+        selected_weights = token_weights[supervision_mask].to(token_loss.dtype)
+        token_loss = token_loss * selected_weights
+        lift_weight_mean = float(selected_weights.detach().mean().item())
+    else:
+        lift_weight_mean = None
     lift_selected_tokens = int(supervision_mask.sum().detach().item())
     lift_masked_tokens = int(masked_indices.sum().detach().item())
 
@@ -315,6 +381,7 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
             "ratios": ratios,
             "lift_selected_tokens": lift_selected_tokens,
             "lift_masked_tokens": lift_masked_tokens,
+            "lift_weight_mean": lift_weight_mean,
         }
         return losses
     # Calculate final loss value    
@@ -330,6 +397,7 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
             "noise_data_cache": noise_data_payload,
             "lift_selected_tokens": lift_selected_tokens,
             "lift_masked_tokens": lift_masked_tokens,
+            "lift_weight_mean": lift_weight_mean,
         }
     else:
         # VarLenLoRA falls here (no noise level to log specific to the adapter)
@@ -339,6 +407,7 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
             "noise_data_cache": noise_data_payload,
             "lift_selected_tokens": lift_selected_tokens,
             "lift_masked_tokens": lift_masked_tokens,
+            "lift_weight_mean": lift_weight_mean,
         }
     return losses
 
