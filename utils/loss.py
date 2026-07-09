@@ -30,6 +30,8 @@ def _build_lift_a_supervision_mask(logits, input_ids, masked_indices, question_l
     variant = str(_get_nested(config, ["train", "lift", "variant"], "lift_a")).lower()
     if variant in {"weighted_nara_lift", "weighted_nara_lift_a", "weighted_nara_lifta"}:
         return masked_indices
+    if variant in {"fork_lift", "fork_lift_a", "forklift", "forklift_a", "fork_lift_nara"}:
+        variant = "nara_lift_a"
     if variant not in {"lift_a", "lifta", "nara_lift_a", "nara_lifta"}:
         raise ValueError(f"Unsupported LIFT variant for this implementation: {variant}")
 
@@ -142,6 +144,125 @@ def _build_lift_token_weights(logits, input_ids, masked_indices, question_length
             weights[b, token_idx] = token_weights.to(weights.dtype)
 
     return weights
+
+
+def _build_fork_lift_token_weights(logits, input_ids, masked_indices, question_length, config):
+    if not _get_nested(config, ["train", "lift", "enabled"], False):
+        return None, {}
+
+    variant = str(_get_nested(config, ["train", "lift", "variant"], "")).lower()
+    if variant not in {"fork_lift", "fork_lift_a", "forklift", "forklift_a", "fork_lift_nara"}:
+        return None, {}
+
+    H = float(_get_nested(config, ["train", "lift", "H"], 3))
+    if H < 2:
+        raise ValueError("train.lift.H must be >= 2")
+
+    min_weight = float(_get_nested(config, ["train", "lift", "min_weight"], 0.5))
+    max_weight = float(_get_nested(config, ["train", "lift", "max_weight"], 2.0))
+    lift_strength = float(_get_nested(config, ["train", "lift", "lift_strength"], 1.0))
+    fork_strength = float(_get_nested(config, ["train", "lift", "fork_strength"], 1.0))
+    fork_token_boost = float(_get_nested(config, ["train", "lift", "fork_token_boost"], 0.0))
+    fork_token_ids = set(int(x) for x in _get_nested(config, ["train", "lift", "fork_token_ids"], []) or [])
+    entropy_percentile = float(_get_nested(config, ["train", "lift", "fork_entropy_percentile"], 0.75))
+    entropy_percentile = min(1.0, max(0.0, entropy_percentile))
+    if min_weight <= 0 or max_weight <= 0 or max_weight < min_weight:
+        raise ValueError("train.lift requires 0 < min_weight <= max_weight")
+
+    weights = torch.ones_like(input_ids, dtype=logits.dtype)
+    stats = {
+        "fork_lift_weight_mean": None,
+        "fork_lift_entropy_mean": None,
+        "fork_lift_high_entropy_tokens": 0,
+    }
+
+    with torch.no_grad():
+        probs = torch.softmax(logits.float(), dim=-1)
+        gt_conf = probs.gather(-1, input_ids.long().unsqueeze(-1)).squeeze(-1)
+        vocab_norm = math.log(max(2, logits.shape[-1]))
+        entropy = -(probs * probs.clamp_min(1e-12).log()).sum(dim=-1) / vocab_norm
+
+        all_selected_weights = []
+        all_selected_entropy = []
+        high_entropy_count = 0
+
+        for b in range(input_ids.shape[0]):
+            token_idx = torch.nonzero(masked_indices[b], as_tuple=False).flatten()
+            num_masked = int(token_idx.numel())
+            if num_masked == 0:
+                continue
+
+            prompt_len = int(question_length[b].item()) if torch.is_tensor(question_length) else int(question_length)
+            answer_len = max(1, input_ids.shape[1] - prompt_len)
+            noise_t = float(num_masked) / float(answer_len)
+
+            conf = gt_conf[b, token_idx]
+            ent = entropy[b, token_idx]
+            conf_min = conf.min()
+            conf_span = (conf.max() - conf_min).clamp_min(1e-6)
+            norm_conf = (conf - conf_min) / conf_span
+
+            if noise_t < (1.0 / H):
+                # Low noise has enough context: emphasize hard, low-confidence tokens.
+                lift_signal = 1.0 - norm_conf
+            elif noise_t >= (1.0 - 1.0 / H):
+                # High noise has sparse context: emphasize learnable, high-confidence tokens.
+                lift_signal = norm_conf
+            else:
+                lift_signal = torch.ones_like(norm_conf)
+
+            ent_min = ent.min()
+            ent_span = (ent.max() - ent_min).clamp_min(1e-6)
+            norm_entropy = (ent - ent_min) / ent_span
+            threshold = torch.quantile(ent.float(), entropy_percentile)
+            high_entropy = ent >= threshold
+            high_entropy_count += int(high_entropy.sum().item())
+
+            fork_signal = norm_entropy
+            if fork_token_ids:
+                fork_ids = torch.zeros_like(fork_signal)
+                for token_id in fork_token_ids:
+                    fork_ids = torch.maximum(fork_ids, (input_ids[b, token_idx] == token_id).to(fork_signal.dtype))
+                fork_signal = fork_signal + fork_token_boost * fork_ids
+
+            token_weights = (1.0 + lift_strength * lift_signal) * (1.0 + fork_strength * fork_signal)
+            token_weights = token_weights / token_weights.mean().clamp_min(1e-6)
+            token_weights = token_weights.clamp(min=min_weight, max=max_weight)
+            weights[b, token_idx] = token_weights.to(weights.dtype)
+
+            all_selected_weights.append(token_weights.float())
+            all_selected_entropy.append(ent.float())
+
+        if all_selected_weights:
+            stats["fork_lift_weight_mean"] = float(torch.cat(all_selected_weights).mean().item())
+            stats["fork_lift_entropy_mean"] = float(torch.cat(all_selected_entropy).mean().item())
+            stats["fork_lift_high_entropy_tokens"] = high_entropy_count
+
+    return weights, stats
+
+
+def _compute_nara_c_smoothness_loss(denoiser, noise_level, noise_density, config):
+    reg_cfg = _get_nested(config, ["train", "c_smooth_reg"], None)
+    if reg_cfg is None or not _get_nested(config, ["train", "c_smooth_reg", "enabled"], False):
+        return None
+
+    weight = float(_get_nested(config, ["train", "c_smooth_reg", "weight"], 0.0))
+    if weight <= 0.0:
+        return None
+
+    real_model = denoiser.module if hasattr(denoiser, "module") else denoiser
+    if not hasattr(real_model, "compute_c_smoothness_loss"):
+        return None
+
+    delta = float(_get_nested(config, ["train", "c_smooth_reg", "delta"], 0.05))
+    adapter_name = str(_get_nested(config, ["train", "c_smooth_reg", "adapter_name"], "default"))
+    smooth_loss = real_model.compute_c_smoothness_loss(
+        adapter_name=adapter_name,
+        noise_level=noise_level,
+        noise_density=noise_density,
+        delta=delta,
+    )
+    return smooth_loss * weight
 
 
 def compute_loss_by_config(
@@ -360,8 +481,19 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
         question_length=question_length,
         config=config,
     )
+    fork_lift_weights, fork_lift_stats = _build_fork_lift_token_weights(
+        logits=logits,
+        input_ids=input_ids,
+        masked_indices=supervision_mask,
+        question_length=question_length,
+        config=config,
+    )
+    if fork_lift_weights is not None:
+        token_weights = fork_lift_weights if token_weights is None else token_weights * fork_lift_weights
+
     if token_weights is not None:
         selected_weights = token_weights[supervision_mask].to(token_loss.dtype)
+        selected_weights = selected_weights / selected_weights.detach().mean().clamp_min(1e-6)
         token_loss = token_loss * selected_weights
         lift_weight_mean = float(selected_weights.detach().mean().item())
     else:
@@ -371,17 +503,31 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
 
     use_cross_entropy = config.eval.get("use_cross_entropy", False) if hasattr(config, "eval") else False
     # import pdb; pdb.set_trace()
+    c_smooth_loss = None
+    if finetuning_type == FINETUNING_TYPE.NARA and noise_level_for_loss is not None:
+        c_smooth_loss = _compute_nara_c_smoothness_loss(
+            denoiser=denoiser,
+            noise_level=noise_level_for_loss,
+            noise_density=current_nd if "current_nd" in locals() else None,
+            config=config,
+        )
+
     if use_cross_entropy:
+        final_loss = token_loss.sum()
+        if c_smooth_loss is not None:
+            final_loss = final_loss + c_smooth_loss
         if not getattr(compute_original_llada_loss, "has_printed_ce_info", False):
             print(f"Info: Using Cross Entropy Loss (skipping division by noise ratio).")
             compute_original_llada_loss.has_printed_ce_info = True
         losses = {
-            "loss": token_loss.sum(),
+            "loss": final_loss,
             "masked_indices": supervision_mask,
             "ratios": ratios,
             "lift_selected_tokens": lift_selected_tokens,
             "lift_masked_tokens": lift_masked_tokens,
             "lift_weight_mean": lift_weight_mean,
+            "c_smooth_loss": float(c_smooth_loss.detach().item()) if c_smooth_loss is not None else None,
+            **fork_lift_stats,
         }
         return losses
     # Calculate final loss value    
@@ -401,13 +547,18 @@ def compute_original_llada_loss(input_ids, denoiser, question_length, config, no
         }
     else:
         # VarLenLoRA falls here (no noise level to log specific to the adapter)
+        final_loss = token_loss.sum()/ratios
+        if c_smooth_loss is not None:
+            final_loss = final_loss + c_smooth_loss
         losses = {
-            "loss": token_loss.sum()/ratios,
+            "loss": final_loss,
             "masked_indices": supervision_mask,
             "noise_data_cache": noise_data_payload,
             "lift_selected_tokens": lift_selected_tokens,
             "lift_masked_tokens": lift_masked_tokens,
             "lift_weight_mean": lift_weight_mean,
+            "c_smooth_loss": float(c_smooth_loss.detach().item()) if c_smooth_loss is not None else None,
+            **fork_lift_stats,
         }
     return losses
 

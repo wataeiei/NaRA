@@ -2,6 +2,7 @@ import os
 import csv
 import json
 import time
+import sys
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HUGGINGFACE_HUB_CACHE"] = "/root/hf_cache"
@@ -234,6 +235,76 @@ def main(args):
             **payload,
         }
         _append_jsonl("train_events.jsonl", row)
+
+    def _to_plain_container(obj):
+        return OmegaConf.to_container(obj, resolve=True) if OmegaConf.is_config(obj) else obj
+
+    def _env_snapshot() -> Dict[str, Optional[str]]:
+        keys = [
+            "NARA_SKIP_LAYERS",
+            "NARA_SKIP_LAYER_REGEX",
+            "NARA_DEBUG_SKIP_LAYERS",
+            "NARA_DEBUG_TARGETS",
+            "WANDB_MODE",
+            "CUDA_VISIBLE_DEVICES",
+            "HF_ENDPOINT",
+            "HUGGINGFACE_HUB_CACHE",
+            "PYTORCH_CUDA_ALLOC_CONF",
+        ]
+        return {key: os.environ.get(key) for key in keys}
+
+    def _nara_adapter_metadata(model) -> Dict[str, object]:
+        unwrapped = accelerator.unwrap_model(model)
+        lora_layers = getattr(unwrapped, "lora_layers", None)
+        if lora_layers is None and hasattr(unwrapped, "base_model"):
+            lora_layers = getattr(unwrapped.base_model, "lora_layers", None)
+
+        adapter_layer_counts = {}
+        if isinstance(lora_layers, dict):
+            adapter_layer_counts = {name: len(layers) for name, layers in lora_layers.items()}
+
+        trainable_adapter_modules = 0
+        total_adapter_modules = 0
+        for module in unwrapped.modules():
+            if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
+                total_adapter_modules += 1
+                has_trainable = False
+                for params in (module.lora_A.values(), module.lora_B.values()):
+                    if any(p.requires_grad for p in params):
+                        has_trainable = True
+                if has_trainable:
+                    trainable_adapter_modules += 1
+
+        return {
+            "nara_adapter_layer_counts": adapter_layer_counts,
+            "nara_total_adapter_modules": total_adapter_modules,
+            "nara_trainable_adapter_modules": trainable_adapter_modules,
+        }
+
+    def _experiment_metadata() -> Dict[str, object]:
+        ft_params = _to_plain_container(config.get("finetuning_parameters", {})) or {}
+        train_lift = _to_plain_container(config.train.get("lift", None)) if hasattr(config, "train") else None
+        c_smooth_reg = _to_plain_container(config.train.get("c_smooth_reg", None)) if hasattr(config, "train") else None
+        env = _env_snapshot()
+        effective_skip_layers = env.get("NARA_SKIP_LAYERS") or ft_params.get("skip_layers")
+        effective_skip_regex = env.get("NARA_SKIP_LAYER_REGEX") or ft_params.get("skip_layer_regex")
+
+        return {
+            "command": " ".join(sys.argv),
+            "config_path": os.path.abspath(args.config),
+            "save_dir": output_dir,
+            "metrics_dir": metrics_dir,
+            "args": vars(args),
+            "env": env,
+            "effective_skip_layers": effective_skip_layers,
+            "effective_skip_layer_regex": effective_skip_regex,
+            "finetuning_parameters": ft_params,
+            "lift": train_lift,
+            "c_smooth_reg": c_smooth_reg,
+            "max_steps": config.get("max_steps", None),
+            "param_stats": param_stats,
+            **_nara_adapter_metadata(denoiser),
+        }
 
     def _record_checkpoint(tag: str, save_path: str):
         if not accelerator.is_main_process:
@@ -693,6 +764,21 @@ def main(args):
         "batch_size": config.data.batch_size,
         "gradient_accumulation_steps": config.train.gradient_accumulation_steps,
     }
+    experiment_metadata = _experiment_metadata()
+    if accelerator.is_main_process:
+        metadata_path = os.path.join(metrics_dir, "experiment_metadata.json")
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(experiment_metadata, f, ensure_ascii=False, indent=2)
+        resolved_config_path = os.path.join(metrics_dir, "resolved_config.yaml")
+        OmegaConf.save(config=config, f=resolved_config_path, resolve=True)
+        _record_event(
+            "experiment_metadata",
+            metadata_path=metadata_path,
+            resolved_config_path=resolved_config_path,
+            effective_skip_layers=experiment_metadata.get("effective_skip_layers"),
+            effective_skip_layer_regex=experiment_metadata.get("effective_skip_layer_regex"),
+            lift_variant=(experiment_metadata.get("lift") or {}).get("variant") if isinstance(experiment_metadata.get("lift"), dict) else None,
+        )
 
     for epoch_num in range(state["global_epoch"] + 1, config.train.epoch_num + 1):
 
@@ -874,6 +960,10 @@ def main(args):
                 lift_selected_tokens = losses.get("lift_selected_tokens", None)
                 lift_masked_tokens = losses.get("lift_masked_tokens", None)
                 lift_weight_mean = losses.get("lift_weight_mean", None)
+                c_smooth_loss = losses.get("c_smooth_loss", None)
+                fork_lift_weight_mean = losses.get("fork_lift_weight_mean", None)
+                fork_lift_entropy_mean = losses.get("fork_lift_entropy_mean", None)
+                fork_lift_high_entropy_tokens = losses.get("fork_lift_high_entropy_tokens", None)
                 torch.cuda.empty_cache()
                 accelerator.backward(loss_tgt)
                 if accelerator.sync_gradients:
@@ -921,6 +1011,13 @@ def main(args):
                     "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "elapsed_sec": round(now - training_start_time, 3),
                     "update_duration_sec": round(now - last_update_time, 3),
+                    "run_name": run_name,
+                    "config_path": experiment_metadata["config_path"],
+                    "output_dir": output_dir,
+                    "effective_skip_layers": experiment_metadata.get("effective_skip_layers"),
+                    "effective_skip_layer_regex": experiment_metadata.get("effective_skip_layer_regex"),
+                    "lift_variant": (experiment_metadata.get("lift") or {}).get("variant") if isinstance(experiment_metadata.get("lift"), dict) else None,
+                    "stop_after_updates": args.stop_after_updates,
                     "epoch": epoch_num,
                     "batch_num": batch_num,
                     "global_step": state["global_step"],
@@ -942,6 +1039,14 @@ def main(args):
                     )
                     if lift_weight_mean is not None:
                         update_row["lift_weight_mean"] = round(lift_weight_mean, 6)
+                if c_smooth_loss is not None:
+                    update_row["c_smooth_loss"] = round(c_smooth_loss, 8)
+                if fork_lift_weight_mean is not None:
+                    update_row["fork_lift_weight_mean"] = round(fork_lift_weight_mean, 6)
+                if fork_lift_entropy_mean is not None:
+                    update_row["fork_lift_entropy_mean"] = round(fork_lift_entropy_mean, 6)
+                if fork_lift_high_entropy_tokens is not None:
+                    update_row["fork_lift_high_entropy_tokens"] = fork_lift_high_entropy_tokens
                 if len(optimizer.param_groups) > 1:
                     update_row["lr_c_mapper"] = optimizer.param_groups[1]["lr"]
                 _append_jsonl("train_updates.jsonl", update_row)
@@ -1016,6 +1121,23 @@ def main(args):
             "seed": exp_config["seed"],
             "rank": exp_config["rank"],
             "epochs": exp_config["epochs"],
+            "config_path": experiment_metadata["config_path"],
+            "command": experiment_metadata["command"],
+            "effective_skip_layers": experiment_metadata.get("effective_skip_layers"),
+            "effective_skip_layer_regex": experiment_metadata.get("effective_skip_layer_regex"),
+            "nara_total_adapter_modules": experiment_metadata.get("nara_total_adapter_modules"),
+            "nara_trainable_adapter_modules": experiment_metadata.get("nara_trainable_adapter_modules"),
+            "save_every_updates": args.save_every_updates,
+            "stop_after_updates": args.stop_after_updates,
+            "force_save_debug": args.force_save_debug,
+            "wandb_mode": experiment_metadata["env"].get("WANDB_MODE"),
+            "cuda_visible_devices": experiment_metadata["env"].get("CUDA_VISIBLE_DEVICES"),
+            "lift_enabled": (experiment_metadata.get("lift") or {}).get("enabled") if isinstance(experiment_metadata.get("lift"), dict) else None,
+            "lift_variant": (experiment_metadata.get("lift") or {}).get("variant") if isinstance(experiment_metadata.get("lift"), dict) else None,
+            "lift_H": (experiment_metadata.get("lift") or {}).get("H") if isinstance(experiment_metadata.get("lift"), dict) else None,
+            "fork_strength": (experiment_metadata.get("lift") or {}).get("fork_strength") if isinstance(experiment_metadata.get("lift"), dict) else None,
+            "lift_strength": (experiment_metadata.get("lift") or {}).get("lift_strength") if isinstance(experiment_metadata.get("lift"), dict) else None,
+            "fork_entropy_percentile": (experiment_metadata.get("lift") or {}).get("fork_entropy_percentile") if isinstance(experiment_metadata.get("lift"), dict) else None,
             "trainable_params_M": param_stats["total_trainable_M"],
             "total_params_M": param_stats["total_all_M"],
             "trainable_ratio_percent": round(param_stats["trainable_ratio"], 4),

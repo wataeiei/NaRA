@@ -57,6 +57,39 @@ Available configs:
 | Commonsense (170k) | `config/nara/llada_instruct_nara_commonsense170k.yaml` |
 | Code (code_feedback) | `config/nara/llada_instruct_nara_code_feedback.yaml` |
 
+### Optional innovation: Noise-Continuity Regularization
+
+NARA learns a dynamic core matrix `C(lambda)` for each denoising noise level. To make this trajectory smoother, this repo also includes an optional **Noise-Continuity Regularization** term:
+
+```text
+|| C(lambda + delta) - C(lambda) ||_F^2
+```
+
+It encourages adjacent denoising states to use compatible adapter transformations, which is especially useful for diffusion language models where generation moves through many nearby noise levels. Run the math config with this regularizer enabled:
+
+```bash
+python train.py --config config/nara/llada_instruct_nara_math14k_csmooth.yaml --seed 1234
+```
+
+### Fork-LIFT NaRA
+
+Fork-LIFT NaRA combines two diffusion-LLM training signals:
+
+- LIFT-style learnability: low-noise steps emphasize hard tokens, high-noise steps emphasize easy tokens.
+- Flexibility-Trap-style fork awareness: high-entropy masked tokens receive larger loss weight because they are more likely to correspond to reasoning branch points.
+
+Run the freeze-mid smoke config:
+
+```bash
+python train.py --config config/nara/smoke_nara_fork_lift_freeze_mid.yaml --seed 1234
+```
+
+Run the split math14k config:
+
+```bash
+python train.py --config config/nara/math14k_split_fork_lift_freeze_mid.yaml --seed 1234
+```
+
 ## Evaluation
 
 Install evaluation dependencies:

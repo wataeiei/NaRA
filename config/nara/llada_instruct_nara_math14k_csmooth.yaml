@@ -48,10 +48,10 @@ train:
   save_every: 64
   per_example_ratio: True
   c_smooth_reg:
-    enabled: False
+    enabled: True
     weight: 0.01
     delta: 0.05
-  exp_name: &exp_name "${model}_${finetuning_method}_${task_name}_r_${finetuning_parameters.r_ab}_lr_${train.lr}_epc_${train.epoch_num}_cscale_${finetuning_parameters.c_scale}_stage1_${train.stage_1}"
+  exp_name: &exp_name "${model}_${finetuning_method}_${task_name}_csmooth_w${train.c_smooth_reg.weight}_d${train.c_smooth_reg.delta}_r_${finetuning_parameters.r_ab}_lr_${train.lr}_epc_${train.epoch_num}_cscale_${finetuning_parameters.c_scale}_stage1_${train.stage_1}"
   wandb_proj: "${model}_${finetuning_method}_${task_name}"
   eval:
     metric: 'loss'

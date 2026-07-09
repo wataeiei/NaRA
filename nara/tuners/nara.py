@@ -686,6 +686,75 @@ class NARAModel(nn.Module):
         self.c_matrix_cache[adapter_name] = final_c_list
         # --- [Core update end] ---
         self.c_cache_stale[adapter_name] = False
+
+    def compute_c_smoothness_loss(
+        self,
+        adapter_name: str = "default",
+        noise_level: Optional[Union[float, torch.Tensor]] = None,
+        noise_density: Optional[Union[float, torch.Tensor]] = None,
+        delta: float = 0.05,
+    ) -> torch.Tensor:
+        """
+        Penalize abrupt changes in generated NARA cores along the noise trajectory.
+
+        This is used as an optional training regularizer:
+            ||C(lambda + delta) - C(lambda)||_F^2
+        """
+        if adapter_name not in self.peft_config:
+            raise ValueError(f"Unknown adapter: {adapter_name}")
+
+        lcfg: NARAConfig = self.peft_config[adapter_name]
+        if self.training_stage == 1 or lcfg.input_mode == "constant" or lcfg.input_mode not in ["nl", "both"]:
+            ref = next(self.parameters())
+            return ref.new_zeros(())
+
+        relevant_keys = [k for k in self.global_mapper.keys() if k.startswith(adapter_name)]
+        if not relevant_keys:
+            ref = next(self.parameters())
+            return ref.new_zeros(())
+
+        mapper0 = self.global_mapper[relevant_keys[0]]
+        any_p = next(mapper0.parameters())
+        dtype = any_p.dtype
+        device = any_p.device
+        input_mode = lcfg.input_mode
+
+        base_nl = self.noise_level if noise_level is None else noise_level
+        if base_nl is None:
+            return any_p.new_zeros(())
+        base_nl = _as_tensor_like(base_nl, any_p, dtype=dtype).clamp(0.0, 1.0)
+        next_nl = (base_nl + float(delta)).clamp(0.0, 1.0)
+        if torch.allclose(base_nl, next_nl):
+            next_nl = (base_nl - float(delta)).clamp(0.0, 1.0)
+        if torch.allclose(base_nl, next_nl):
+            return any_p.new_zeros(())
+
+        base_nd = self.noise_density if noise_density is None else noise_density
+
+        def build_input(nl_value: torch.Tensor) -> torch.Tensor:
+            embeddings = []
+            if input_mode in ["nl", "both"]:
+                emb = self.embedding_layers[f"{adapter_name}_NL_emb"](nl_value)
+                embeddings.append(emb)
+            if input_mode in ["nd", "both"]:
+                if base_nd is None:
+                    raise ValueError("noise_density is required for NARA input_mode='both'.")
+                nd_value = _as_tensor_like(base_nd, any_p, dtype=dtype)
+                emb = self.embedding_layers[f"{adapter_name}_ND_emb"](nd_value)
+                embeddings.append(emb)
+            return torch.cat(embeddings, dim=-1)
+
+        x0 = build_input(base_nl)
+        x1 = build_input(next_nl)
+
+        losses = []
+        for key in relevant_keys:
+            mapper = self.global_mapper[key]
+            c0 = mapper(x0).float()
+            c1 = mapper(x1).float()
+            losses.append(F.mse_loss(c0, c1))
+
+        return torch.stack(losses).mean().to(device=device)
         
     def add_adapter(self, adapter_name, config: Optional[NARAConfig] = None):
         if config is not None:
