@@ -286,8 +286,8 @@ def main(args):
         train_lift = _to_plain_container(config.train.get("lift", None)) if hasattr(config, "train") else None
         c_smooth_reg = _to_plain_container(config.train.get("c_smooth_reg", None)) if hasattr(config, "train") else None
         env = _env_snapshot()
-        effective_skip_layers = env.get("NARA_SKIP_LAYERS") or ft_params.get("skip_layers")
-        effective_skip_regex = env.get("NARA_SKIP_LAYER_REGEX") or ft_params.get("skip_layer_regex")
+        effective_skip_layers = env.get("NARA_SKIP_LAYERS") or ft_params.get("skip_layers") or config.get("skip_layers", None)
+        effective_skip_regex = env.get("NARA_SKIP_LAYER_REGEX") or ft_params.get("skip_layer_regex") or config.get("skip_layer_regex", None)
 
         return {
             "command": " ".join(sys.argv),
