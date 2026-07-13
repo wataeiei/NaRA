@@ -372,6 +372,13 @@ def _nara_should_freeze_key(key: str, lcfg) -> bool:
     layer_idx = _nara_layer_index_from_key(key)
     return layer_idx in freeze_layers
 
+
+def _nara_should_freeze_param_name(name: str, lcfg) -> bool:
+    """Return True for LoRA A/B params that belong to a frozen layer."""
+    if not ("lora_A" in name or "lora_B" in name):
+        return False
+    return _nara_should_freeze_key(name, lcfg)
+
 # ---------------------------------------------------------------------
 # Model wrapper
 # ---------------------------------------------------------------------
@@ -1062,10 +1069,12 @@ def mark_only_ContextLoRA_as_trainable(
     if config:
         if config.train_a:
             for n, p in model.named_parameters():
-                if "lora_A" in n: p.requires_grad = True
+                if "lora_A" in n and not _nara_should_freeze_param_name(n, config):
+                    p.requires_grad = True
         if config.train_b:
             for n, p in model.named_parameters():
-                if "lora_B" in n: p.requires_grad = True
+                if "lora_B" in n and not _nara_should_freeze_param_name(n, config):
+                    p.requires_grad = True
         if config.train_mapper:
             for n, p in model.named_parameters():
                 # Enable grads for global_mapper, embedding_layers, AND constant_c
