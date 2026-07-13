@@ -211,6 +211,10 @@ class NARAConfig(PeftConfig):
         default=None,
         metadata={"help": "Layer indexes/ranges to skip, e.g. 8-23,30."},
     )
+    freeze_layers: Optional[str] = field(
+        default=None,
+        metadata={"help": "Layer indexes/ranges whose NARA A/B adapter params are frozen but still used in forward."},
+    )
 
     # core LoRA knobs
     lora_alpha: int = field(default=32)
@@ -355,6 +359,18 @@ def _nara_should_skip_key(key: str, lcfg) -> bool:
         return layer_idx in skip_layers
 
     return False
+
+
+def _nara_should_freeze_key(key: str, lcfg) -> bool:
+    """Return True when this target module should keep adapter forward but freeze A/B params."""
+    freeze_layers = _nara_parse_skip_layers(os.environ.get("NARA_FREEZE_LAYERS"))
+    if not freeze_layers:
+        freeze_layers = _nara_parse_skip_layers(getattr(lcfg, "freeze_layers", None))
+    if not freeze_layers:
+        return False
+
+    layer_idx = _nara_layer_index_from_key(key)
+    return layer_idx in freeze_layers
 
 # ---------------------------------------------------------------------
 # Model wrapper
@@ -970,6 +986,14 @@ class NARAModel(nn.Module):
                     **kwargs,
                 )
                 self._replace_module(parent, target_name, new_module, target)
+
+                if _nara_should_freeze_key(key, lcfg):
+                    if adapter_name in new_module.lora_A:
+                        new_module.lora_A[adapter_name].requires_grad = False
+                    if adapter_name in new_module.lora_B:
+                        new_module.lora_B[adapter_name].requires_grad = False
+                    if os.environ.get("NARA_DEBUG_FREEZE_LAYERS"):
+                        print(f"[NARA freeze] {key}")
                 
                 self.lora_layers[adapter_name].append(new_module)
                 layer_global_index += 1

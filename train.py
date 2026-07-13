@@ -288,6 +288,7 @@ def main(args):
         env = _env_snapshot()
         effective_skip_layers = env.get("NARA_SKIP_LAYERS") or ft_params.get("skip_layers") or config.get("skip_layers", None)
         effective_skip_regex = env.get("NARA_SKIP_LAYER_REGEX") or ft_params.get("skip_layer_regex") or config.get("skip_layer_regex", None)
+        effective_freeze_layers = env.get("NARA_FREEZE_LAYERS") or ft_params.get("freeze_layers") or config.get("freeze_layers", None)
 
         return {
             "command": " ".join(sys.argv),
@@ -298,6 +299,7 @@ def main(args):
             "env": env,
             "effective_skip_layers": effective_skip_layers,
             "effective_skip_layer_regex": effective_skip_regex,
+            "effective_freeze_layers": effective_freeze_layers,
             "finetuning_parameters": ft_params,
             "lift": train_lift,
             "c_smooth_reg": c_smooth_reg,

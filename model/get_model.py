@@ -70,7 +70,7 @@ def get_nara_models(model_type, config):
         print(f"[NARA] Resumed from: {decoder_resume_path}")
     else:
         ft_params = OmegaConf.to_container(config.finetuning_parameters, resolve=True)
-        for key in ("skip_layers", "skip_layer_regex"):
+        for key in ("skip_layers", "skip_layer_regex", "freeze_layers"):
             if key not in ft_params and config.get(key, None) is not None:
                 ft_params[key] = config.get(key)
         lora_ckpt_path = ft_params.pop("lora_ckpt_path", None)
